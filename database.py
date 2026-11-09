@@ -1,16 +1,41 @@
+import os
 import sqlite3
 from datetime import datetime
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from dotenv import load_dotenv
 
-DB_NAME = "members.db"
+load_dotenv()
 
-def get_connection():
-    return sqlite3.connect(DB_NAME)
+MONGO_URI = os.getenv("MONGO_URI")
+SQLITE_DB = "members.db"
+
+# MongoDB connection
+mongo_client = None
+mongo_db = None
+mongo_col = None
+
+if MONGO_URI:
+    try:
+        from pymongo import MongoClient
+        mongo_client = MongoClient(MONGO_URI)
+        mongo_db = mongo_client["telegram_tracker"]
+        mongo_col = mongo_db["members"]
+        print("✅ MongoDB Atlas se safaltapoorvak connect ho gaya!")
+    except Exception as e:
+        print(f"⚠️ MongoDB connection me warning: {e}. SQLite use kiya jayega.")
+        mongo_col = None
 
 def init_db():
-    """Database aur members table create karta hai."""
-    with get_connection() as conn:
+    """Database tables/collections initialize karta hai."""
+    if mongo_col is not None:
+        # MongoDB me indexes create karein
+        mongo_col.create_index("status")
+        mongo_col.create_index("left_at")
+        return
+
+    # Fallback SQLite
+    with sqlite3.connect(SQLITE_DB) as conn:
         cursor = conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS members (
@@ -30,7 +55,28 @@ def init_db():
 def save_scanned_member(user_id, first_name, last_name, username, phone=None):
     """Puraane members ko initial scan ke waqt save karta hai."""
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with get_connection() as conn:
+
+    if mongo_col is not None:
+        mongo_col.update_one(
+            {"_id": user_id},
+            {
+                "$set": {
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "username": username,
+                    "phone": phone,
+                    "status": "active",
+                    "updated_at": now_str
+                },
+                "$setOnInsert": {
+                    "joined_at": "Pre-existing Member"
+                }
+            },
+            upsert=True
+        )
+        return
+
+    with sqlite3.connect(SQLITE_DB) as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO members (user_id, first_name, last_name, username, phone, status, joined_at, updated_at)
@@ -48,7 +94,26 @@ def save_scanned_member(user_id, first_name, last_name, username, phone=None):
 def member_joined(user_id, first_name, last_name, username):
     """Naya member join hone par record add ya update karta hai."""
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with get_connection() as conn:
+
+    if mongo_col is not None:
+        mongo_col.update_one(
+            {"_id": user_id},
+            {
+                "$set": {
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "username": username,
+                    "status": "active",
+                    "joined_at": now_str,
+                    "left_at": None,
+                    "updated_at": now_str
+                }
+            },
+            upsert=True
+        )
+        return
+
+    with sqlite3.connect(SQLITE_DB) as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO members (user_id, first_name, last_name, username, status, joined_at, left_at, updated_at)
@@ -66,9 +131,34 @@ def member_joined(user_id, first_name, last_name, username):
 def member_left(user_id, first_name=None, last_name=None, username=None):
     """Member ke group chhodne (left/kicked) par status update karta hai."""
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with get_connection() as conn:
+
+    if mongo_col is not None:
+        update_data = {
+            "status": "left",
+            "left_at": now_str,
+            "updated_at": now_str
+        }
+        if first_name:
+            update_data["first_name"] = first_name
+        if last_name:
+            update_data["last_name"] = last_name
+        if username:
+            update_data["username"] = username
+
+        mongo_col.update_one(
+            {"_id": user_id},
+            {
+                "$set": update_data,
+                "$setOnInsert": {
+                    "joined_at": "Unknown"
+                }
+            },
+            upsert=True
+        )
+        return
+
+    with sqlite3.connect(SQLITE_DB) as conn:
         cursor = conn.cursor()
-        # Pehle check karo ki user pehle se database me hai ya nahi
         cursor.execute("SELECT user_id FROM members WHERE user_id = ?", (user_id,))
         exists = cursor.fetchone()
 
@@ -79,7 +169,6 @@ def member_left(user_id, first_name=None, last_name=None, username=None):
                 WHERE user_id = ?
             """, (now_str, now_str, user_id))
         else:
-            # Agar record me pehle se nahi tha, to naya entry banao left status ke sath
             cursor.execute("""
                 INSERT INTO members (user_id, first_name, last_name, username, status, joined_at, left_at, updated_at)
                 VALUES (?, ?, ?, ?, 'left', 'Unknown', ?, ?)
@@ -88,7 +177,17 @@ def member_left(user_id, first_name=None, last_name=None, username=None):
 
 def get_stats():
     """Group ke current stats nikalta hai."""
-    with get_connection() as conn:
+    if mongo_col is not None:
+        active_count = mongo_col.count_documents({"status": "active"})
+        left_count = mongo_col.count_documents({"status": "left"})
+        total_tracked = mongo_col.count_documents({})
+        return {
+            "active": active_count,
+            "left": left_count,
+            "total": total_tracked
+        }
+
+    with sqlite3.connect(SQLITE_DB) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM members WHERE status = 'active'")
         active_count = cursor.fetchone()[0]
@@ -107,7 +206,23 @@ def get_stats():
 
 def get_recent_left(limit=10):
     """Haal hi me group chhodne wale members ki list deta hai."""
-    with get_connection() as conn:
+    if mongo_col is not None:
+        docs = mongo_col.find(
+            {"status": "left", "left_at": {"$ne": None}}
+        ).sort("left_at", -1).limit(limit)
+
+        result = []
+        for doc in docs:
+            result.append((
+                doc["_id"],
+                doc.get("first_name"),
+                doc.get("last_name"),
+                doc.get("username"),
+                doc.get("left_at")
+            ))
+        return result
+
+    with sqlite3.connect(SQLITE_DB) as conn:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT user_id, first_name, last_name, username, left_at
@@ -124,7 +239,6 @@ def export_to_excel(filepath="telegram_members_report.xlsx"):
     ws = wb.active
     ws.title = "Members Report"
 
-    # Header columns
     headers = [
         "User ID",
         "First Name",
@@ -138,7 +252,6 @@ def export_to_excel(filepath="telegram_members_report.xlsx"):
     ]
     ws.append(headers)
 
-    # Header styling
     header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
     header_fill = PatternFill(start_color="1F497D", end_color="1F497D", fill_type="solid")
     align_center = Alignment(horizontal="center", vertical="center")
@@ -157,18 +270,34 @@ def export_to_excel(filepath="telegram_members_report.xlsx"):
         cell.fill = header_fill
         cell.alignment = align_center
 
-    # Fetch data
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT user_id, first_name, last_name, username, phone, status, joined_at, left_at, updated_at
-            FROM members
-            ORDER BY status ASC, updated_at DESC
-        """)
-        rows = cursor.fetchall()
+    # Rows retrieve karein
+    rows = []
+    if mongo_col is not None:
+        docs = mongo_col.find({}).sort("status", 1)
+        for d in docs:
+            rows.append((
+                d.get("_id"),
+                d.get("first_name", ""),
+                d.get("last_name", ""),
+                d.get("username", ""),
+                d.get("phone", ""),
+                d.get("status", "active"),
+                d.get("joined_at", ""),
+                d.get("left_at", ""),
+                d.get("updated_at", "")
+            ))
+    else:
+        with sqlite3.connect(SQLITE_DB) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT user_id, first_name, last_name, username, phone, status, joined_at, left_at, updated_at
+                FROM members
+                ORDER BY status ASC, updated_at DESC
+            """)
+            rows = cursor.fetchall()
 
-    active_fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid") # light green
-    left_fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")   # light red/orange
+    active_fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
+    left_fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
 
     for row_idx, row_data in enumerate(rows, start=2):
         for col_idx, value in enumerate(row_data, start=1):
@@ -177,7 +306,6 @@ def export_to_excel(filepath="telegram_members_report.xlsx"):
             cell.border = thin_border
             cell.alignment = align_left
 
-            # Highlight status column
             if col_idx == 6:
                 cell.alignment = align_center
                 if str(value).lower() == "active":
@@ -185,7 +313,6 @@ def export_to_excel(filepath="telegram_members_report.xlsx"):
                 else:
                     cell.fill = left_fill
 
-    # Auto-adjust column widths
     for col in ws.columns:
         max_len = max(len(str(cell.value or '')) for cell in col)
         col_letter = openpyxl.utils.get_column_letter(col[0].column)
