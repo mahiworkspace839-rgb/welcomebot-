@@ -3,6 +3,7 @@ bot.py - 24/7 chalne wala Telegram bot jo Join aur Leave ko live track karta hai
 """
 import os
 import logging
+import asyncio
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from dotenv import load_dotenv
@@ -188,7 +189,18 @@ async def track_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Admission Confirmed!"
         )
         try:
-            await chat.send_message(text=welcome_text)
+            sent_msg = await chat.send_message(text=welcome_text)
+            
+            # 1 Minute (60 seconds) baad message khud-b-khud delete ho jaye
+            async def auto_delete(msg, delay=60):
+                await asyncio.sleep(delay)
+                try:
+                    await msg.delete()
+                    logger.info("Welcome message 1 minute baad auto-delete ho gaya.")
+                except Exception as del_err:
+                    logger.warning(f"Auto-delete error: {del_err}")
+
+            asyncio.create_task(auto_delete(sent_msg, 60))
         except Exception as e:
             logger.error(f"Welcome message error: {e}")
 
