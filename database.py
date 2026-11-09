@@ -33,13 +33,21 @@ if MONGO_URI:
         print(f"⚠️ MongoDB Atlas connection error: {e}. Fallback SQLite use kiya ja raha hai.")
         mongo_col = None
 
+# Name changes collection
+mongo_name_col = None
+if mongo_db is not None:
+    mongo_name_col = mongo_db["name_changes"]
+
 def init_db():
     """Database tables/collections initialize karta hai."""
-    global mongo_col
+    global mongo_col, mongo_name_col
     if mongo_col is not None:
         try:
             mongo_col.create_index("status")
             mongo_col.create_index("left_at")
+            if mongo_name_col is not None:
+                mongo_name_col.create_index("user_id")
+                mongo_name_col.create_index("changed_at")
             return
         except Exception as e:
             print(f"⚠️ Index create warning: {e}")
@@ -58,6 +66,19 @@ def init_db():
                 joined_at TEXT,
                 left_at TEXT,
                 updated_at TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS name_changes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                old_first_name TEXT,
+                old_last_name TEXT,
+                old_username TEXT,
+                new_first_name TEXT,
+                new_last_name TEXT,
+                new_username TEXT,
+                changed_at TEXT
             )
         """)
         conn.commit()
@@ -193,6 +214,137 @@ def member_left(user_id, first_name=None, last_name=None, username=None):
                 VALUES (?, ?, ?, ?, 'left', 'Unknown', ?, ?)
             """, (user_id, first_name, last_name, username, now_str, now_str))
         conn.commit()
+
+def check_name_change(user_id, current_first, current_last, current_username):
+    """
+    User ka current naam database me stored naam se compare karta hai.
+    Agar naam badla hai toh name_changes me log karta hai aur change details return karta hai.
+    Agar nahi badla toh None return karta hai.
+    """
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    if mongo_col is not None:
+        try:
+            doc = mongo_col.find_one({"_id": user_id})
+            if not doc:
+                return None
+
+            old_first = doc.get("first_name") or ""
+            old_last = doc.get("last_name") or ""
+            old_uname = doc.get("username") or ""
+
+            name_changed = (old_first != (current_first or "")) or (old_last != (current_last or ""))
+            uname_changed = (old_uname != (current_username or ""))
+
+            if not name_changed and not uname_changed:
+                return None
+
+            # Name change log save karein
+            change_record = {
+                "user_id": user_id,
+                "old_first_name": old_first,
+                "old_last_name": old_last,
+                "old_username": old_uname,
+                "new_first_name": current_first or "",
+                "new_last_name": current_last or "",
+                "new_username": current_username or "",
+                "changed_at": now_str
+            }
+            if mongo_name_col is not None:
+                mongo_name_col.insert_one(change_record)
+
+            # Member record me naam update karein
+            mongo_col.update_one(
+                {"_id": user_id},
+                {"$set": {
+                    "first_name": current_first,
+                    "last_name": current_last,
+                    "username": current_username,
+                    "updated_at": now_str
+                }}
+            )
+
+            return {
+                "user_id": user_id,
+                "old_name": f"{old_first} {old_last}".strip() or "No Name",
+                "new_name": f"{current_first or ''} {current_last or ''}".strip() or "No Name",
+                "old_username": old_uname,
+                "new_username": current_username,
+                "name_changed": name_changed,
+                "username_changed": uname_changed,
+                "changed_at": now_str
+            }
+        except Exception as e:
+            print(f"MongoDB name check error: {e}")
+            return None
+
+    # SQLite fallback
+    with sqlite3.connect(SQLITE_DB) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT first_name, last_name, username FROM members WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+
+        old_first, old_last, old_uname = row[0] or "", row[1] or "", row[2] or ""
+
+        name_changed = (old_first != (current_first or "")) or (old_last != (current_last or ""))
+        uname_changed = (old_uname != (current_username or ""))
+
+        if not name_changed and not uname_changed:
+            return None
+
+        cursor.execute("""
+            INSERT INTO name_changes (user_id, old_first_name, old_last_name, old_username,
+                                      new_first_name, new_last_name, new_username, changed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (user_id, old_first, old_last, old_uname,
+              current_first or "", current_last or "", current_username or "", now_str))
+
+        cursor.execute("""
+            UPDATE members SET first_name = ?, last_name = ?, username = ?, updated_at = ?
+            WHERE user_id = ?
+        """, (current_first, current_last, current_username, now_str, user_id))
+        conn.commit()
+
+        return {
+            "user_id": user_id,
+            "old_name": f"{old_first} {old_last}".strip() or "No Name",
+            "new_name": f"{current_first or ''} {current_last or ''}".strip() or "No Name",
+            "old_username": old_uname,
+            "new_username": current_username,
+            "name_changed": name_changed,
+            "username_changed": uname_changed,
+            "changed_at": now_str
+        }
+
+def get_recent_name_changes(limit=15):
+    """Haal hi ki name changes ki list return karta hai."""
+    if mongo_name_col is not None:
+        try:
+            docs = mongo_name_col.find({}).sort("changed_at", -1).limit(limit)
+            return list(docs)
+        except Exception as e:
+            print(f"MongoDB name changes read error: {e}")
+
+    with sqlite3.connect(SQLITE_DB) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT user_id, old_first_name, old_last_name, old_username,
+                   new_first_name, new_last_name, new_username, changed_at
+            FROM name_changes
+            ORDER BY changed_at DESC
+            LIMIT ?
+        """, (limit,))
+        rows = cursor.fetchall()
+        return [
+            {
+                "user_id": r[0],
+                "old_first_name": r[1], "old_last_name": r[2], "old_username": r[3],
+                "new_first_name": r[4], "new_last_name": r[5], "new_username": r[6],
+                "changed_at": r[7]
+            } for r in rows
+        ]
 
 def get_all_members():
     """Sabhi members ki full details list return karta hai."""

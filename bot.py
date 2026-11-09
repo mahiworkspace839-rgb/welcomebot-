@@ -14,6 +14,9 @@ from telegram.ext import (
     ChatMemberHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    MessageReactionHandler,
+    filters,
 )
 import database
 
@@ -217,6 +220,101 @@ async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Excel export error: {e}")
         await status_msg.edit_text(f"❌ File export karne me error aaya: {e}")
 
+async def namechanges_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Haal hi ki sabhi name changes ki history dikhata hai."""
+    if not await is_allowed(update):
+        return
+
+    changes = database.get_recent_name_changes(limit=15)
+    if not changes:
+        await update.message.reply_text("ℹ️ Abhi tak kisi ne bhi apna naam nahi badla hai.")
+        return
+
+    text = "🔄 **Recent Name Changes:**\n\n"
+    for idx, c in enumerate(changes, 1):
+        old_name = f"{c.get('old_first_name', '')} {c.get('old_last_name', '')}".strip() or "No Name"
+        new_name = f"{c.get('new_first_name', '')} {c.get('new_last_name', '')}".strip() or "No Name"
+        old_uname = f"@{c.get('old_username')}" if c.get("old_username") else "None"
+        new_uname = f"@{c.get('new_username')}" if c.get("new_username") else "None"
+        changed_at = c.get("changed_at", "N/A")
+        uid = c.get("user_id")
+
+        entry = f"{idx}. 🆔 `{uid}`\n"
+        entry += f"   📛 **Purana Naam:** {old_name} ({old_uname})\n"
+        entry += f"   ✨ **Naya Naam:** {new_name} ({new_uname})\n"
+        entry += f"   🕒 **Changed At:** `{changed_at}`\n\n"
+        text += entry
+
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def handle_name_change(chat, user):
+    """Common helper: Message, Reaction ya Event aane par name change detect karke alert bhejta hai."""
+    if not user or user.is_bot or not chat:
+        return
+    if chat.type not in ["group", "supergroup"]:
+        return
+    if ALLOWED_GROUP_ID and str(chat.id) != str(ALLOWED_GROUP_ID):
+        return
+
+    change = database.check_name_change(
+        user_id=user.id,
+        current_first=user.first_name,
+        current_last=user.last_name,
+        current_username=user.username
+    )
+
+    if change is None:
+        return  # Koi change nahi mila
+
+    alert_parts = []
+    if change["name_changed"]:
+        alert_parts.append(
+            f"📛 **Purana Naam:** {change['old_name']}\n"
+            f"✨ **Naya Naam:** {change['new_name']}"
+        )
+    if change["username_changed"]:
+        old_u = f"@{change['old_username']}" if change["old_username"] else "None"
+        new_u = f"@{change['new_username']}" if change["new_username"] else "None"
+        alert_parts.append(
+            f"📛 **Purana Username:** {old_u}\n"
+            f"✨ **Naya Username:** {new_u}"
+        )
+
+    alert_text = (
+        f"🔄 **Name Change Detected!**\n\n"
+        f"🆔 **User ID:** `{change['user_id']}`\n"
+        + "\n".join(alert_parts) +
+        f"\n🕒 **Changed At:** `{change['changed_at']}`"
+    )
+
+    try:
+        sent_alert = await chat.send_message(text=alert_text, parse_mode="Markdown")
+        logger.info(f"Name change alert sent for {user.id}")
+
+        # 30 second baad alert group se khud-b-khud delete ho jaye
+        async def auto_delete_alert(msg, delay=30):
+            await asyncio.sleep(delay)
+            try:
+                await msg.delete()
+                logger.info("Name change alert 30 second baad delete ho gaya.")
+            except Exception as del_err:
+                logger.warning(f"Alert auto-delete error: {del_err}")
+
+        asyncio.create_task(auto_delete_alert(sent_alert, 30))
+    except Exception as e:
+        logger.error(f"Name change alert error: {e}")
+
+async def check_name_on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Har message (text, photo, sticker, voice) aane par name change check karein."""
+    if update.message and update.effective_user and update.effective_chat:
+        await handle_name_change(update.effective_chat, update.effective_user)
+
+async def check_name_on_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Kisi message par Emoji Reaction aane par bhi name change check karein."""
+    reaction = update.message_reaction
+    if reaction and reaction.chat and reaction.user:
+        await handle_name_change(reaction.chat, reaction.user)
+
 async def track_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Real-time join aur leave events ko capture karta hai."""
     result = update.chat_member
@@ -300,6 +398,11 @@ async def track_bot_added(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Group leave error: {e}")
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
@@ -338,6 +441,7 @@ def main():
     application.add_handler(CommandHandler("list", members_cmd))
     application.add_handler(CommandHandler("stats", stats_cmd))
     application.add_handler(CommandHandler("left", recent_left_cmd))
+    application.add_handler(CommandHandler("namechanges", namechanges_cmd))
     application.add_handler(CommandHandler("export", export_cmd))
 
     # Real-time Chat Member updates listener
@@ -346,6 +450,15 @@ def main():
     )
     application.add_handler(
         ChatMemberHandler(track_bot_added, ChatMemberHandler.MY_CHAT_MEMBER)
+    )
+
+    # Har message par Name Change check karne ke liye listener
+    application.add_handler(
+        MessageHandler(filters.ALL & ~filters.COMMAND, check_name_on_message)
+    )
+    # Emoji Reaction aane par bhi check karein
+    application.add_handler(
+        MessageReactionHandler(check_name_on_reaction)
     )
 
     print("🚀 Member Tracker Bot start ho gaya hai! Listening for joins & leaves...")
