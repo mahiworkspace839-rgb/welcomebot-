@@ -182,6 +182,16 @@ async def track_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
             username=user.username
         )
 
+        # Group me exactly ye message bhejna:
+        welcome_text = (
+            f"🎉 Welcome {user.first_name}\n\n"
+            f"✅ Admission Confirmed!"
+        )
+        try:
+            await chat.send_message(text=welcome_text)
+        except Exception as e:
+            logger.error(f"Welcome message error: {e}")
+
     # Case 2: Member ne LEAVE kiya ya Kick/Ban hua
     elif was_member and not is_member:
         logger.info(f"Member LEFT: {user.first_name} (ID: {user.id})")
