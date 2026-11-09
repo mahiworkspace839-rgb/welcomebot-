@@ -25,7 +25,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_USER_ID = os.getenv("ADMIN_USER_ID")  # Optional: specific admin Telegram ID
+ADMIN_USER_ID = os.getenv("ADMIN_USER_ID")    # Sirf aapka Telegram User ID
+ALLOWED_GROUP_ID = os.getenv("ALLOWED_GROUP_ID")  # Sirf aapka Group ID (e.g. -100xxxxxxxxxx)
 
 MEMBER_STATUSES = {
     ChatMemberStatus.MEMBER,
@@ -39,47 +40,61 @@ NON_MEMBER_STATUSES = {
     ChatMemberStatus.BANNED,
 }
 
-async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Check karta hai ki command bhejnewala admin hai ya nahi."""
+async def is_allowed(update: Update) -> bool:
+    """
+    Security Filter:
+    1. Personal DM me: Sirf ADMIN_USER_ID ko reply karega, baaki sabke liye chup chap rahega.
+    2. Group me: Agar kisi aur ka group hai to turant Leave karega aur chup chap rahega.
+    """
     user = update.effective_user
-    if not user:
+    chat = update.effective_chat
+    if not user or not chat:
         return False
-    
-    # Agar .env me ADMIN_USER_ID diya hai to verify karein
-    if ADMIN_USER_ID and str(user.id) == str(ADMIN_USER_ID):
+
+    # 1. Personal DM chat
+    if chat.type == "private":
+        if ADMIN_USER_ID and str(user.id) != str(ADMIN_USER_ID):
+            # Kisi anjaan ko koi reply nahi, bilkul silent
+            return False
         return True
 
-    # Agar group chat me hai to chat admins check karein
-    chat = update.effective_chat
-    if chat and chat.type in ["group", "supergroup"]:
-        try:
-            admins = await chat.get_administrators()
-            admin_ids = [admin.user.id for admin in admins]
-            return user.id in admin_ids
-        except Exception:
+    # 2. Group chat
+    if chat.type in ["group", "supergroup"]:
+        # Agar koi aur apne group me add kare to auto-leave
+        if ALLOWED_GROUP_ID and str(chat.id) != str(ALLOWED_GROUP_ID):
+            try:
+                await chat.leave()
+            except Exception:
+                pass
             return False
 
-    # Agar private chat hai aur koi ADMIN_USER_ID set nahi hai to allow karein
-    return True
+        # Group me commands sirf aap run kar sakein
+        if ADMIN_USER_ID and str(user.id) != str(ADMIN_USER_ID):
+            return False
+        return True
+
+    return False
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command instructions ke sath."""
+    if not await is_allowed(update):
+        return  # Silent ignore
+
     msg = (
         "👋 **Namaste! Main Member Tracking Bot hoon.**\n\n"
         "Main group ke members ka aana-jaana (Join/Left) real-time me record karta hoon.\n\n"
-        "📌 **Admin Commands:**\n"
+        "📌 **Aapke Commands:**\n"
         "• `/stats` - Group ke active aur left members ki ginti\n"
         "• `/left` - Haal hi me group chhodne wale members\n"
         "• `/export` - Excel file download karein (Full Report)\n\n"
-        "⚠️ *Note: Bots ko automatically filter/skip kar diya jata hai.*"
+        "🔒 *Security: Yeh bot sirf aapke group aur aapke messages par active hai.*"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Current stats dikhata hai."""
-    if not await is_admin(update, context):
-        await update.message.reply_text("❌ Yeh command sirf Admins ke liye hai.")
-        return
+    if not await is_allowed(update):
+        return  # Silent ignore
 
     stats = database.get_stats()
     text = (
@@ -93,9 +108,8 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def recent_left_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Haal hi me group chhodne walo ki list."""
-    if not await is_admin(update, context):
-        await update.message.reply_text("❌ Yeh command sirf Admins ke liye hai.")
-        return
+    if not await is_allowed(update):
+        return  # Silent ignore
 
     recent = database.get_recent_left(limit=10)
     if not recent:
@@ -113,9 +127,8 @@ async def recent_left_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Excel file generate karke bhejta hai."""
-    if not await is_admin(update, context):
-        await update.message.reply_text("❌ Yeh command sirf Admins ke liye hai.")
-        return
+    if not await is_allowed(update):
+        return  # Silent ignore
 
     msg = await update.message.reply_text("⏳ Excel report taiyaar ho rahi hai, kripya intezar karein...")
     try:
@@ -137,11 +150,20 @@ async def track_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not result:
         return
 
+    chat = update.effective_chat
+    # Security: Agar kisi aur ka group hai to seedha auto-leave
+    if ALLOWED_GROUP_ID and str(chat.id) != str(ALLOWED_GROUP_ID):
+        logger.warning(f"Unauthorized group {chat.id} attempted tracking. Leaving...")
+        try:
+            await chat.leave()
+        except Exception:
+            pass
+        return
+
     user = result.new_chat_member.user
 
     # 1. Strict Bot Filter: Agar user bot hai, toh bilkul ignore karein
     if user.is_bot:
-        logger.info(f"Bot detected and ignored: @{user.username} (ID: {user.id})")
         return
 
     old_status = result.old_chat_member.status
@@ -169,6 +191,19 @@ async def track_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
             last_name=user.last_name,
             username=user.username
         )
+
+async def track_bot_added(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Bot ko kisi unauthorized group me add kiya jaye to turant leave kar de."""
+    chat = update.effective_chat
+    if not chat or chat.type not in ["group", "supergroup"]:
+        return
+
+    if ALLOWED_GROUP_ID and str(chat.id) != str(ALLOWED_GROUP_ID):
+        logger.warning(f"Bot unauthorized group me add hua ({chat.id} - {chat.title}). Auto-leaving...")
+        try:
+            await chat.leave()
+        except Exception as e:
+            logger.error(f"Group leave error: {e}")
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -212,6 +247,9 @@ def main():
     # Real-time Chat Member updates listener
     application.add_handler(
         ChatMemberHandler(track_chat_member, ChatMemberHandler.CHAT_MEMBER)
+    )
+    application.add_handler(
+        ChatMemberHandler(track_bot_added, ChatMemberHandler.MY_CHAT_MEMBER)
     )
 
     print("🚀 Member Tracker Bot start ho gaya hai! Listening for joins & leaves...")
