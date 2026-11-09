@@ -85,9 +85,10 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 **Namaste! Main Member Tracking Bot hoon.**\n\n"
         "Main group ke members ka aana-jaana (Join/Left) real-time me record karta hoon.\n\n"
         "📌 **Aapke Commands:**\n"
-        "• `/stats` - Group ke active aur left members ki ginti\n"
-        "• `/left` - Haal hi me group chhodne wale members\n"
-        "• `/export` - Excel file download karein (Full Report)\n\n"
+        "• `/members` ya `/list` - Sabhi members ki poori details (Name, User ID, Username, Dates) DM me paayein\n"
+        "• `/export` - Excel file (.xlsx) seedha DM me paayein\n"
+        "• `/stats` - Active aur left members ka live count\n"
+        "• `/left` - Haal hi me group chhodne wale members\n\n"
         "🔒 *Security: Yeh bot sirf aapke group aur aapke messages par active hai.*"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
@@ -126,24 +127,95 @@ async def recent_left_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(text, parse_mode="Markdown")
 
-async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Excel file generate karke bhejta hai."""
+async def members_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sabhi members ka pura detail (Name, ID, Status, Dates) seedha DM pe bhejta hai."""
     if not await is_allowed(update):
         return  # Silent ignore
 
-    msg = await update.message.reply_text("⏳ Excel report taiyaar ho rahi hai, kripya intezar karein...")
+    user = update.effective_user
+    chat = update.effective_chat
+    target_chat_id = user.id  # Pura data seedha aapke DM pe jayega
+
+    if chat.type in ["group", "supergroup"]:
+        await update.message.reply_text("🔒 Group me privacy ke liye poori list aapke Personal DM me bhej di gayi hai!")
+
+    members = database.get_all_members()
+    if not members:
+        await context.bot.send_message(
+            chat_id=target_chat_id,
+            text="ℹ️ Abhi tak database me koi member record nahi hua hai."
+        )
+        return
+
+    total = len(members)
+    await context.bot.send_message(
+        chat_id=target_chat_id,
+        text=f"📋 **Total Members List ({total}):**\nHar member ki poori details neeche hain:"
+    )
+
+    # Chunking: 15 members per message taaki Telegram text limit exceed na ho
+    chunk_size = 15
+    for i in range(0, total, chunk_size):
+        chunk = members[i:i + chunk_size]
+        text_lines = []
+        for idx, m in enumerate(chunk, start=i + 1):
+            fname = m.get("first_name") or ""
+            lname = m.get("last_name") or ""
+            full_name = f"{fname} {lname}".strip() or "No Name"
+            uname = f"@{m.get('username')}" if m.get("username") else "None"
+            uid = m.get("_id") or m.get("user_id")
+            status = m.get("status", "active")
+            status_icon = "🟢 Active" if status == "active" else "🔴 Left"
+            joined = m.get("joined_at", "N/A")
+            left = m.get("left_at")
+
+            entry = (
+                f"**{idx}. {full_name}**\n"
+                f"   🆔 **User ID:** `{uid}`\n"
+                f"   👤 **Username:** {uname}\n"
+                f"   📌 **Status:** {status_icon}\n"
+                f"   📅 **Joined:** `{joined}`"
+            )
+            if left:
+                entry += f"\n   🚪 **Left At:** `{left}`"
+            text_lines.append(entry)
+
+        message_chunk = "\n\n".join(text_lines)
+        await context.bot.send_message(
+            chat_id=target_chat_id,
+            text=message_chunk,
+            parse_mode="Markdown"
+        )
+
+async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Excel file generate karke seedha DM pe bhejta hai."""
+    if not await is_allowed(update):
+        return  # Silent ignore
+
+    user = update.effective_user
+    chat = update.effective_chat
+    target_chat_id = user.id
+
+    if chat.type in ["group", "supergroup"]:
+        await update.message.reply_text("🔒 Excel report aapke Personal DM me bhej di gayi hai!")
+
+    status_msg = await context.bot.send_message(
+        chat_id=target_chat_id,
+        text="⏳ Excel report taiyaar ho rahi hai, kripya intezar karein..."
+    )
     try:
         filepath = database.export_to_excel("telegram_members_live_report.xlsx")
         with open(filepath, "rb") as f:
-            await update.message.reply_document(
+            await context.bot.send_document(
+                chat_id=target_chat_id,
                 document=f,
                 filename="telegram_members_live_report.xlsx",
-                caption="📊 **Members Report (Excel File)**\nIsme sabhi Active aur Left members ka pura data hai."
+                caption="📊 **Members Full Report (Excel File)**\nIsme sabhi members ka User ID, Naam, Username, Phone aur Dates hain."
             )
-        await msg.delete()
+        await status_msg.delete()
     except Exception as e:
         logger.error(f"Excel export error: {e}")
-        await msg.edit_text(f"❌ File export karne me error aaya: {e}")
+        await status_msg.edit_text(f"❌ File export karne me error aaya: {e}")
 
 async def track_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Real-time join aur leave events ko capture karta hai."""
@@ -262,6 +334,8 @@ def main():
 
     # Handlers register karein
     application.add_handler(CommandHandler("start", start_cmd))
+    application.add_handler(CommandHandler("members", members_cmd))
+    application.add_handler(CommandHandler("list", members_cmd))
     application.add_handler(CommandHandler("stats", stats_cmd))
     application.add_handler(CommandHandler("left", recent_left_cmd))
     application.add_handler(CommandHandler("export", export_cmd))

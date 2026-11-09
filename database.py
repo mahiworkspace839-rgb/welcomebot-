@@ -18,21 +18,31 @@ mongo_col = None
 if MONGO_URI:
     try:
         from pymongo import MongoClient
-        mongo_client = MongoClient(MONGO_URI)
+        import certifi
+        mongo_client = MongoClient(
+            MONGO_URI,
+            tlsCAFile=certifi.where(),
+            serverSelectionTimeoutMS=5000
+        )
+        # Test connection ping
+        mongo_client.admin.command('ping')
         mongo_db = mongo_client["telegram_tracker"]
         mongo_col = mongo_db["members"]
         print("✅ MongoDB Atlas se safaltapoorvak connect ho gaya!")
     except Exception as e:
-        print(f"⚠️ MongoDB connection me warning: {e}. SQLite use kiya jayega.")
+        print(f"⚠️ MongoDB Atlas connection error: {e}. Fallback SQLite use kiya ja raha hai.")
         mongo_col = None
 
 def init_db():
     """Database tables/collections initialize karta hai."""
+    global mongo_col
     if mongo_col is not None:
-        # MongoDB me indexes create karein
-        mongo_col.create_index("status")
-        mongo_col.create_index("left_at")
-        return
+        try:
+            mongo_col.create_index("status")
+            mongo_col.create_index("left_at")
+            return
+        except Exception as e:
+            print(f"⚠️ Index create warning: {e}")
 
     # Fallback SQLite
     with sqlite3.connect(SQLITE_DB) as conn:
@@ -57,24 +67,27 @@ def save_scanned_member(user_id, first_name, last_name, username, phone=None):
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     if mongo_col is not None:
-        mongo_col.update_one(
-            {"_id": user_id},
-            {
-                "$set": {
-                    "first_name": first_name,
-                    "last_name": last_name,
-                    "username": username,
-                    "phone": phone,
-                    "status": "active",
-                    "updated_at": now_str
+        try:
+            mongo_col.update_one(
+                {"_id": user_id},
+                {
+                    "$set": {
+                        "first_name": first_name,
+                        "last_name": last_name,
+                        "username": username,
+                        "phone": phone,
+                        "status": "active",
+                        "updated_at": now_str
+                    },
+                    "$setOnInsert": {
+                        "joined_at": "Pre-existing Member"
+                    }
                 },
-                "$setOnInsert": {
-                    "joined_at": "Pre-existing Member"
-                }
-            },
-            upsert=True
-        )
-        return
+                upsert=True
+            )
+            return
+        except Exception as e:
+            print(f"MongoDB write error: {e}")
 
     with sqlite3.connect(SQLITE_DB) as conn:
         cursor = conn.cursor()
@@ -96,22 +109,25 @@ def member_joined(user_id, first_name, last_name, username):
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     if mongo_col is not None:
-        mongo_col.update_one(
-            {"_id": user_id},
-            {
-                "$set": {
-                    "first_name": first_name,
-                    "last_name": last_name,
-                    "username": username,
-                    "status": "active",
-                    "joined_at": now_str,
-                    "left_at": None,
-                    "updated_at": now_str
-                }
-            },
-            upsert=True
-        )
-        return
+        try:
+            mongo_col.update_one(
+                {"_id": user_id},
+                {
+                    "$set": {
+                        "first_name": first_name,
+                        "last_name": last_name,
+                        "username": username,
+                        "status": "active",
+                        "joined_at": now_str,
+                        "left_at": None,
+                        "updated_at": now_str
+                    }
+                },
+                upsert=True
+            )
+            return
+        except Exception as e:
+            print(f"MongoDB join write error: {e}")
 
     with sqlite3.connect(SQLITE_DB) as conn:
         cursor = conn.cursor()
@@ -133,29 +149,32 @@ def member_left(user_id, first_name=None, last_name=None, username=None):
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     if mongo_col is not None:
-        update_data = {
-            "status": "left",
-            "left_at": now_str,
-            "updated_at": now_str
-        }
-        if first_name:
-            update_data["first_name"] = first_name
-        if last_name:
-            update_data["last_name"] = last_name
-        if username:
-            update_data["username"] = username
+        try:
+            update_data = {
+                "status": "left",
+                "left_at": now_str,
+                "updated_at": now_str
+            }
+            if first_name:
+                update_data["first_name"] = first_name
+            if last_name:
+                update_data["last_name"] = last_name
+            if username:
+                update_data["username"] = username
 
-        mongo_col.update_one(
-            {"_id": user_id},
-            {
-                "$set": update_data,
-                "$setOnInsert": {
-                    "joined_at": "Unknown"
-                }
-            },
-            upsert=True
-        )
-        return
+            mongo_col.update_one(
+                {"_id": user_id},
+                {
+                    "$set": update_data,
+                    "$setOnInsert": {
+                        "joined_at": "Unknown"
+                    }
+                },
+                upsert=True
+            )
+            return
+        except Exception as e:
+            print(f"MongoDB left write error: {e}")
 
     with sqlite3.connect(SQLITE_DB) as conn:
         cursor = conn.cursor()
@@ -175,17 +194,49 @@ def member_left(user_id, first_name=None, last_name=None, username=None):
             """, (user_id, first_name, last_name, username, now_str, now_str))
         conn.commit()
 
+def get_all_members():
+    """Sabhi members ki full details list return karta hai."""
+    if mongo_col is not None:
+        try:
+            return list(mongo_col.find({}).sort("status", 1))
+        except Exception as e:
+            print(f"MongoDB read error: {e}")
+
+    with sqlite3.connect(SQLITE_DB) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT user_id, first_name, last_name, username, phone, status, joined_at, left_at
+            FROM members
+            ORDER BY status ASC
+        """)
+        rows = cursor.fetchall()
+        return [
+            {
+                "_id": r[0],
+                "first_name": r[1],
+                "last_name": r[2],
+                "username": r[3],
+                "phone": r[4],
+                "status": r[5],
+                "joined_at": r[6],
+                "left_at": r[7]
+            } for r in rows
+        ]
+
 def get_stats():
     """Group ke current stats nikalta hai."""
     if mongo_col is not None:
-        active_count = mongo_col.count_documents({"status": "active"})
-        left_count = mongo_col.count_documents({"status": "left"})
-        total_tracked = mongo_col.count_documents({})
-        return {
-            "active": active_count,
-            "left": left_count,
-            "total": total_tracked
-        }
+        try:
+            active_count = mongo_col.count_documents({"status": "active"})
+            left_count = mongo_col.count_documents({"status": "left"})
+            total_tracked = mongo_col.count_documents({})
+            return {
+                "active": active_count,
+                "left": left_count,
+                "total": total_tracked
+            }
+        except Exception as e:
+            print(f"MongoDB stats read error: {e}")
 
     with sqlite3.connect(SQLITE_DB) as conn:
         cursor = conn.cursor()
@@ -207,20 +258,23 @@ def get_stats():
 def get_recent_left(limit=10):
     """Haal hi me group chhodne wale members ki list deta hai."""
     if mongo_col is not None:
-        docs = mongo_col.find(
-            {"status": "left", "left_at": {"$ne": None}}
-        ).sort("left_at", -1).limit(limit)
+        try:
+            docs = mongo_col.find(
+                {"status": "left", "left_at": {"$ne": None}}
+            ).sort("left_at", -1).limit(limit)
 
-        result = []
-        for doc in docs:
-            result.append((
-                doc["_id"],
-                doc.get("first_name"),
-                doc.get("last_name"),
-                doc.get("username"),
-                doc.get("left_at")
-            ))
-        return result
+            result = []
+            for doc in docs:
+                result.append((
+                    doc["_id"],
+                    doc.get("first_name"),
+                    doc.get("last_name"),
+                    doc.get("username"),
+                    doc.get("left_at")
+                ))
+            return result
+        except Exception as e:
+            print(f"MongoDB recent left read error: {e}")
 
     with sqlite3.connect(SQLITE_DB) as conn:
         cursor = conn.cursor()
@@ -270,23 +324,26 @@ def export_to_excel(filepath="telegram_members_report.xlsx"):
         cell.fill = header_fill
         cell.alignment = align_center
 
-    # Rows retrieve karein
     rows = []
     if mongo_col is not None:
-        docs = mongo_col.find({}).sort("status", 1)
-        for d in docs:
-            rows.append((
-                d.get("_id"),
-                d.get("first_name", ""),
-                d.get("last_name", ""),
-                d.get("username", ""),
-                d.get("phone", ""),
-                d.get("status", "active"),
-                d.get("joined_at", ""),
-                d.get("left_at", ""),
-                d.get("updated_at", "")
-            ))
-    else:
+        try:
+            docs = mongo_col.find({}).sort("status", 1)
+            for d in docs:
+                rows.append((
+                    d.get("_id"),
+                    d.get("first_name", ""),
+                    d.get("last_name", ""),
+                    d.get("username", ""),
+                    d.get("phone", ""),
+                    d.get("status", "active"),
+                    d.get("joined_at", ""),
+                    d.get("left_at", ""),
+                    d.get("updated_at", "")
+                ))
+        except Exception as e:
+            print(f"MongoDB export read error: {e}")
+
+    if not rows:
         with sqlite3.connect(SQLITE_DB) as conn:
             cursor = conn.cursor()
             cursor.execute("""
