@@ -2,13 +2,14 @@
 bot.py - 24/7 chalne wala Telegram bot jo Join aur Leave ko live track karta hai.
 """
 import os
+import re
 import logging
 import asyncio
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.constants import ChatMemberStatus
+from telegram.constants import ChatMemberStatus, MessageEntityType
 from telegram.ext import (
     ApplicationBuilder,
     ChatMemberHandler,
@@ -29,8 +30,31 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_USER_ID = os.getenv("ADMIN_USER_ID")    # Sirf aapka Telegram User ID
+ADMIN_USER_ID = os.getenv("ADMIN_USER_ID")    # Optional extra ID
 ALLOWED_GROUP_ID = os.getenv("ALLOWED_GROUP_ID")  # Sirf aapka Group ID (e.g. -100xxxxxxxxxx)
+
+# 1. Super Owner (Sirf Aap: 6416451659) - Sabhi Commands & Data Access sirf aapke liye
+SUPER_OWNER_ID = "6416451659"
+
+# 2. Links Whitelist (Sirf Aap aur 8914751355 link send kar sakte hain)
+LINK_ALLOWED_IDS = {"6416451659", "8914751355"}
+
+def is_super_owner(user_id: int) -> bool:
+    """Check karta hai ki user sirf aur sirf MAIN OWNER (6416451659) hai."""
+    uid = str(user_id)
+    if uid == SUPER_OWNER_ID:
+        return True
+    if ADMIN_USER_ID and uid == str(ADMIN_USER_ID).strip():
+        return True
+    return False
+
+def is_allowed_to_post_links(user_id: int) -> bool:
+    """
+    VIP Link Protection:
+    Sirf 6416451659 (Aap) aur 8914751355 ko link bhejne ki chhoot hai.
+    Baaki koi bhi ho (chahe koi aur admin ya aam member), unka link TURANT FAST delete hoga!
+    """
+    return str(user_id) in LINK_ALLOWED_IDS
 
 MEMBER_STATUSES = {
     ChatMemberStatus.MEMBER,
@@ -46,25 +70,21 @@ NON_MEMBER_STATUSES = {
 
 async def is_allowed(update: Update) -> bool:
     """
-    Security Filter:
-    1. Personal DM me: Sirf ADMIN_USER_ID ko reply karega, baaki sabke liye chup chap rahega.
-    2. Group me: Agar kisi aur ka group hai to turant Leave karega aur chup chap rahega.
+    Commands Security:
+    Sirf aur sirf 6416451659 (Aap) commands (/members, /export, /stats, /namechanges) chala sakte hain!
+    8914751355 ya koi bhi dusra admin/member agar command chalayega toh bot bilkul chup chap rahega.
     """
     user = update.effective_user
     chat = update.effective_chat
     if not user or not chat:
         return False
 
-    # 1. Personal DM chat
-    if chat.type == "private":
-        if ADMIN_USER_ID and str(user.id) != str(ADMIN_USER_ID):
-            # Kisi anjaan ko koi reply nahi, bilkul silent
-            return False
-        return True
+    # Sirf aur sirf SUPER OWNER (6416451659) ko commands allow hain
+    if not is_super_owner(user.id):
+        return False
 
-    # 2. Group chat
+    # Agar group chat me hai to unauthorized group se auto-leave
     if chat.type in ["group", "supergroup"]:
-        # Agar koi aur apne group me add kare to auto-leave
         if ALLOWED_GROUP_ID and str(chat.id) != str(ALLOWED_GROUP_ID):
             try:
                 await chat.leave()
@@ -72,12 +92,7 @@ async def is_allowed(update: Update) -> bool:
                 pass
             return False
 
-        # Group me commands sirf aap run kar sakein
-        if ADMIN_USER_ID and str(user.id) != str(ADMIN_USER_ID):
-            return False
-        return True
-
-    return False
+    return True
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command instructions ke sath."""
@@ -304,10 +319,117 @@ async def handle_name_change(chat, user):
     except Exception as e:
         logger.error(f"Name change alert error: {e}")
 
+LINK_REGEX = re.compile(
+    r'(https?://|www\.|t\.me/|telegram\.me/|bit\.ly/|[a-zA-Z0-9-]+\.(com|in|org|net|xyz|me|io|info|ru|co|biz|online|store|vip))',
+    re.IGNORECASE
+)
+
+
+def has_link(message) -> bool:
+    """Message ya caption me link detect karta hai."""
+    text = f"{message.text or ''} {message.caption or ''}"
+    if LINK_REGEX.search(text):
+        return True
+    entities = list(message.entities or []) + list(message.caption_entities or [])
+    for e in entities:
+        if e.type in [MessageEntityType.URL, MessageEntityType.TEXT_LINK]:
+            return True
+    return False
+
+def is_forwarded(message) -> bool:
+    """Dusre channel/group se forwarded message detect karta hai."""
+    return bool(
+        message.forward_origin
+        or message.forward_date
+        or message.forward_from
+        or message.forward_from_chat
+    )
+
+async def send_auto_delete_warning(chat, text: str, delay: int = 10):
+    """Warning bhejkar 10 second baad auto-delete karta hai."""
+    try:
+        warn_msg = await chat.send_message(text=text, parse_mode="Markdown")
+        async def _delete():
+            await asyncio.sleep(delay)
+            try:
+                await warn_msg.delete()
+            except Exception:
+                pass
+        asyncio.create_task(_delete())
+    except Exception as e:
+        logger.error(f"Warning send error: {e}")
+
+async def clean_service_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Telegram ke faltu system messages ('Rahul joined', 'Priya left') ko turant delete karta hai."""
+    msg = update.message
+    if not msg:
+        return
+    chat = update.effective_chat
+    if not chat or chat.type not in ["group", "supergroup"]:
+        return
+    if ALLOWED_GROUP_ID and str(chat.id) != str(ALLOWED_GROUP_ID):
+        return
+
+    try:
+        await msg.delete()
+        logger.info("Service message (join/leave/pin) auto-deleted.")
+    except Exception as e:
+        logger.warning(f"Could not delete service message: {e}")
+
 async def check_name_on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Har message (text, photo, sticker, voice) aane par name change check karein."""
-    if update.message and update.effective_user and update.effective_chat:
-        await handle_name_change(update.effective_chat, update.effective_user)
+    """Har message aane par Security (Anti-Link, Anti-Forward) aur Name Change check karein."""
+    msg = update.message
+    user = update.effective_user
+    chat = update.effective_chat
+    if not msg or not user or not chat:
+        return
+
+    # 1. Name change tracking
+    await handle_name_change(chat, user)
+
+    # Security sirf group me apply hogi
+    if chat.type not in ["group", "supergroup"]:
+        return
+    if ALLOWED_GROUP_ID and str(chat.id) != str(ALLOWED_GROUP_ID):
+        return
+
+    # Bots ko chhod dein
+    if user.is_bot:
+        return
+
+    # Sirf Main Owner (Aap) ko link bhejna allow hai. Dusre admins aur members sabka link delete hoga!
+    if is_allowed_to_post_links(user.id):
+        return
+
+    # 2. Anti-Link (Link Block karna)
+    if has_link(msg):
+        try:
+            await msg.delete()
+            logger.info(f"Link deleted from user {user.id}")
+            user_mention = f"[{user.first_name}](tg://user?id={user.id})"
+            await send_auto_delete_warning(
+                chat,
+                f"⚠️ {user_mention}, is group me kisi bhi tarah ka **Link** bhejna sakht mana hai!",
+                delay=10
+            )
+            return
+        except Exception as e:
+            logger.error(f"Error deleting link: {e}")
+
+    # 3. Anti-Forward (Dusre channel/group se forward rokna)
+    if is_forwarded(msg):
+        try:
+            await msg.delete()
+            logger.info(f"Forwarded message deleted from user {user.id}")
+            user_mention = f"[{user.first_name}](tg://user?id={user.id})"
+            await send_auto_delete_warning(
+                chat,
+                f"⚠️ {user_mention}, dusre channel ya group ke messages **Forward** karna mana hai!",
+                delay=10
+            )
+            return
+        except Exception as e:
+            logger.error(f"Error deleting forwarded message: {e}")
 
 async def check_name_on_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Kisi message par Emoji Reaction aane par bhi name change check karein."""
@@ -452,7 +574,12 @@ def main():
         ChatMemberHandler(track_bot_added, ChatMemberHandler.MY_CHAT_MEMBER)
     )
 
-    # Har message par Name Change check karne ke liye listener
+    # Telegram ke faltu system messages (joined, left, pinned) ko auto-delete karna
+    application.add_handler(
+        MessageHandler(filters.StatusUpdate.ALL, clean_service_messages)
+    )
+
+    # Har message par Name Change & Anti-Spam Security check karne ke liye listener
     application.add_handler(
         MessageHandler(filters.ALL & ~filters.COMMAND, check_name_on_message)
     )
