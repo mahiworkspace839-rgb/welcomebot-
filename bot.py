@@ -213,7 +213,8 @@ async def recent_left_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid, fname, lname, uname, left_at = row
         name = f"{fname or ''} {lname or ''}".strip() or "Unnamed"
         username_str = f"(@{uname})" if uname else "(No Username)"
-        text += f"{idx}. **{name}** {username_str}\n   🕒 Left At: `{left_at}`\n   🆔 ID: `{uid}`\n\n"
+        left_time = database.format_datetime_ist(left_at)
+        text += f"{idx}. **{name}** {username_str}\n   🕒 Left At: `{left_time}`\n   🆔 ID: `{uid}`\n\n"
 
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -469,8 +470,10 @@ async def members_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             uid = m.get("_id") or m.get("user_id")
             status = m.get("status", "active")
             status_icon = "🟢 Active" if status == "active" else "🔴 Left"
-            joined = m.get("joined_at", "N/A")
-            left = m.get("left_at")
+            joined_raw = m.get("joined_at", "N/A")
+            left_raw = m.get("left_at")
+            joined = database.format_datetime_ist(joined_raw)
+            left = database.format_datetime_ist(left_raw) if left_raw else None
 
             entry = (
                 f"**{idx}. {full_name}**\n"
@@ -733,8 +736,11 @@ async def panel_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
                 uid = m.get("_id") or m.get("user_id")
                 status = m.get("status", "active")
                 status_icon = "🟢 Active" if status == "active" else "🔴 Left"
-                joined = m.get("joined_at", "N/A")
-                entry = f"**{idx}. {full_name}** ({uname})\n   🆔 `{uid}` | {status_icon} | 📅 `{joined}`"
+                joined_raw = m.get("joined_at", "N/A")
+                joined = database.format_datetime_ist(joined_raw)
+                left_raw = m.get("left_at")
+                left_str = f" | 🚪 Left: `{database.format_datetime_ist(left_raw)}`" if left_raw else ""
+                entry = f"**{idx}. {full_name}** ({uname})\n   🆔 `{uid}` | {status_icon} | 📅 `{joined}`{left_str}"
                 text_lines.append(entry)
             await context.bot.send_message(
                 chat_id=query.from_user.id,
@@ -826,7 +832,8 @@ async def panel_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             new_name = f"{c.get('new_first_name', '')} {c.get('new_last_name', '')}".strip() or "No Name"
             old_uname = f"@{c.get('old_username')}" if c.get("old_username") else "None"
             new_uname = f"@{c.get('new_username')}" if c.get("new_username") else "None"
-            changed_at = c.get("changed_at", "N/A")
+            changed_at_raw = c.get("changed_at", "N/A")
+            changed_at = database.format_datetime_ist(changed_at_raw)
             uid = c.get("user_id")
             text += f"{idx}. 🆔 `{uid}`\n   📛 {old_name} ({old_uname}) ➔ {new_name} ({new_uname})\n   🕒 `{changed_at}`\n\n"
         await query.message.reply_text(text, parse_mode="Markdown")
@@ -844,7 +851,8 @@ async def panel_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             uid, fname, lname, uname, left_at = row
             name = f"{fname or ''} {lname or ''}".strip() or "Unnamed"
             username_str = f"(@{uname})" if uname else "(No Username)"
-            text += f"{idx}. **{name}** {username_str}\n   🕒 Left: `{left_at}` | 🆔 `{uid}`\n\n"
+            left_time = database.format_datetime_ist(left_at)
+            text += f"{idx}. **{name}** {username_str}\n   🕒 Left: `{left_time}` | 🆔 `{uid}`\n\n"
         await query.message.reply_text(text, parse_mode="Markdown")
 
     # 10. Night Mode Toggle Button (One-click ON/OFF)

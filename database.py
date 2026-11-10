@@ -1,12 +1,36 @@
 import os
 import re
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from dotenv import load_dotenv
 
 load_dotenv()
+
+def get_ist_now():
+    """Current Indian Standard Time (IST = UTC+5:30) datetime object."""
+    return datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+
+def format_datetime_ist(dt_str):
+    """
+    Purane ya naye datetime string ko pyare 12-hour AM/PM format me badalta hai:
+    '2026-11-09 15:01:42' -> '09 Nov 2026, 03:01 PM'
+    """
+    if not dt_str:
+        return "N/A"
+    try:
+        # Agar already standard format me hai
+        clean_str = str(dt_str).strip()
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %I:%M:%S %p", "%Y-%m-%d"):
+            try:
+                dt = datetime.strptime(clean_str, fmt)
+                return dt.strftime("%d %b %Y, %I:%M %p")
+            except ValueError:
+                pass
+        return clean_str
+    except Exception:
+        return str(dt_str)
 
 MONGO_URI = os.getenv("MONGO_URI")
 SQLITE_DB = "members.db"
@@ -36,12 +60,15 @@ if MONGO_URI:
 
 # Name changes collection
 mongo_name_col = None
+# Warnings collection
+mongo_warn_col = None
 if mongo_db is not None:
     mongo_name_col = mongo_db["name_changes"]
+    mongo_warn_col = mongo_db["warnings"]
 
 def init_db():
     """Database tables/collections initialize karta hai."""
-    global mongo_col, mongo_name_col
+    global mongo_col, mongo_name_col, mongo_warn_col
     if mongo_col is not None:
         try:
             mongo_col.create_index("status")
@@ -49,6 +76,8 @@ def init_db():
             if mongo_name_col is not None:
                 mongo_name_col.create_index("user_id")
                 mongo_name_col.create_index("changed_at")
+            if mongo_warn_col is not None:
+                mongo_warn_col.create_index("user_id")
             return
         except Exception as e:
             print(f"⚠️ Index create warning: {e}")
@@ -91,11 +120,19 @@ def init_db():
                 changed_at TEXT
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS warnings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                reason TEXT,
+                warned_at TEXT
+            )
+        """)
         conn.commit()
 
 def save_scanned_member(user_id, first_name, last_name, username, phone=None):
     """Puraane members ko initial scan ke waqt save karta hai."""
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_str = get_ist_now().strftime("%Y-%m-%d %I:%M:%S %p")
 
     if mongo_col is not None:
         try:
@@ -137,7 +174,7 @@ def save_scanned_member(user_id, first_name, last_name, username, phone=None):
 
 def member_joined(user_id, first_name, last_name, username):
     """Naya member join hone par record add ya update karta hai."""
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_str = get_ist_now().strftime("%Y-%m-%d %I:%M:%S %p")
 
     if mongo_col is not None:
         try:
@@ -177,7 +214,7 @@ def member_joined(user_id, first_name, last_name, username):
 
 def member_left(user_id, first_name=None, last_name=None, username=None):
     """Member ke group chhodne (left/kicked) par status update karta hai."""
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_str = get_ist_now().strftime("%Y-%m-%d %I:%M:%S %p")
 
     if mongo_col is not None:
         try:
@@ -231,7 +268,7 @@ def check_name_change(user_id, current_first, current_last, current_username):
     Agar naam badla hai toh name_changes me log karta hai aur change details return karta hai.
     Agar nahi badla toh None return karta hai.
     """
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_str = get_ist_now().strftime("%Y-%m-%d %I:%M:%S %p")
 
     if mongo_col is not None:
         try:
@@ -542,7 +579,7 @@ def export_to_excel(filepath="telegram_members_report.xlsx"):
 
 def record_message(user_id):
     """Member ke message count aur last seen ko increment karta hai."""
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_str = get_ist_now().strftime("%Y-%m-%d %I:%M:%S %p")
     if mongo_col is not None:
         try:
             mongo_col.update_one(
@@ -688,7 +725,7 @@ def get_top_members(limit=10):
 
 def get_inactive_members(days=15, limit=20):
     """Pichle `days` din se silent/inactive active members."""
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = get_ist_now() - timedelta(days=days)
     cutoff_str = cutoff.strftime("%Y-%m-%d %H:%M:%S")
 
     if mongo_col is not None:
@@ -728,7 +765,7 @@ def get_inactive_members(days=15, limit=20):
 
 def get_daily_summary_stats():
     """Aaj ki 24 ghante ki summary (joins, lefts, name changes, totals)."""
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_str = get_ist_now().strftime("%Y-%m-%d")
 
     if mongo_col is not None:
         try:
@@ -781,3 +818,191 @@ def get_daily_summary_stats():
             "total_members": total_members,
             "date": today_str
         }
+
+
+# ========================================================
+# ⚠️ WARNING SYSTEM (Gaali Filter ke liye auto-warn)
+# ========================================================
+
+def add_warning(user_id, reason="Bad word / Gaali"):
+    """User ko ek warning deta hai. Returns total warnings count."""
+    now_str = get_ist_now().strftime("%Y-%m-%d %I:%M:%S %p")
+
+    if mongo_warn_col is not None:
+        try:
+            mongo_warn_col.insert_one({
+                "user_id": user_id,
+                "reason": reason,
+                "warned_at": now_str,
+            })
+            count = mongo_warn_col.count_documents({"user_id": user_id})
+            return count
+        except Exception as e:
+            print(f"MongoDB add_warning error: {e}")
+
+    with sqlite3.connect(SQLITE_DB) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO warnings (user_id, reason, warned_at) VALUES (?, ?, ?)",
+            (user_id, reason, now_str)
+        )
+        conn.commit()
+        cursor.execute("SELECT COUNT(*) FROM warnings WHERE user_id = ?", (user_id,))
+        return cursor.fetchone()[0]
+
+
+def get_warnings(user_id):
+    """User ki total warnings count return karta hai."""
+    if mongo_warn_col is not None:
+        try:
+            return mongo_warn_col.count_documents({"user_id": user_id})
+        except Exception as e:
+            print(f"MongoDB get_warnings error: {e}")
+
+    with sqlite3.connect(SQLITE_DB) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM warnings WHERE user_id = ?", (user_id,))
+        return cursor.fetchone()[0]
+
+
+def clear_warnings(user_id):
+    """User ki saari warnings clear karta hai."""
+    if mongo_warn_col is not None:
+        try:
+            mongo_warn_col.delete_many({"user_id": user_id})
+            return True
+        except Exception as e:
+            print(f"MongoDB clear_warnings error: {e}")
+
+    with sqlite3.connect(SQLITE_DB) as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM warnings WHERE user_id = ?", (user_id,))
+        conn.commit()
+    return True
+
+
+# ========================================================
+# 📅 WEEKLY REPORT (Monday summary)
+# ========================================================
+
+def get_weekly_summary_stats():
+    """Pichle 7 din ki summary (joins, lefts, name changes, top active)."""
+    today = get_ist_now()
+    week_ago = today - timedelta(days=7)
+    week_ago_str = week_ago.strftime("%Y-%m-%d")
+    today_str = today.strftime("%Y-%m-%d")
+
+    if mongo_col is not None:
+        try:
+            active_total = mongo_col.count_documents({"status": "active"})
+            total_members = mongo_col.count_documents({})
+            joins_week = mongo_col.count_documents({
+                "joined_at": {"$gte": week_ago_str}
+            })
+            left_week = mongo_col.count_documents({
+                "left_at": {"$gte": week_ago_str}
+            })
+            name_changes_week = 0
+            if mongo_name_col is not None:
+                name_changes_week = mongo_name_col.count_documents({
+                    "changed_at": {"$gte": week_ago_str}
+                })
+            # Top 5 active members of the week
+            top_5 = list(mongo_col.find(
+                {"status": "active", "message_count": {"$gt": 0}},
+                {"first_name": 1, "message_count": 1}
+            ).sort("message_count", -1).limit(5))
+            return {
+                "joins": joins_week,
+                "left": left_week,
+                "name_changes": name_changes_week,
+                "active_total": active_total,
+                "total_members": total_members,
+                "top_5": top_5,
+                "from_date": week_ago_str,
+                "to_date": today_str
+            }
+        except Exception as e:
+            print(f"MongoDB weekly summary error: {e}")
+
+    with sqlite3.connect(SQLITE_DB) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM members WHERE status = 'active'")
+        active_total = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM members")
+        total_members = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM members WHERE joined_at >= ?", (week_ago_str,))
+        joins_week = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM members WHERE left_at >= ?", (week_ago_str,))
+        left_week = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM name_changes WHERE changed_at >= ?", (week_ago_str,))
+        name_changes_week = cursor.fetchone()[0]
+
+        cursor.execute("""
+            SELECT first_name, message_count FROM members
+            WHERE status = 'active' AND message_count > 0
+            ORDER BY message_count DESC LIMIT 5
+        """)
+        top_5_rows = cursor.fetchall()
+        top_5 = [{"first_name": r[0], "message_count": r[1]} for r in top_5_rows]
+
+        return {
+            "joins": joins_week,
+            "left": left_week,
+            "name_changes": name_changes_week,
+            "active_total": active_total,
+            "total_members": total_members,
+            "top_5": top_5,
+            "from_date": week_ago_str,
+            "to_date": today_str
+        }
+
+
+# ========================================================
+# 👻 GHOST MEMBER CLEANER (Inactive members list for kick)
+# ========================================================
+
+def get_ghost_members(days=30, limit=50):
+    """X din se bilkul silent active members ki list (kick ke liye)."""
+    cutoff = get_ist_now() - timedelta(days=days)
+    cutoff_str = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+
+    if mongo_col is not None:
+        try:
+            query = {
+                "status": "active",
+                "$or": [
+                    {"last_message_at": None},
+                    {"last_message_at": {"$lt": cutoff_str}},
+                    {"message_count": {"$in": [0, None]}}
+                ]
+            }
+            return list(mongo_col.find(query).limit(limit))
+        except Exception as e:
+            print(f"MongoDB ghost members error: {e}")
+
+    with sqlite3.connect(SQLITE_DB) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT user_id, first_name, last_name, username, joined_at, message_count, last_message_at
+            FROM members
+            WHERE status = 'active' AND (last_message_at IS NULL OR last_message_at < ? OR message_count = 0 OR message_count IS NULL)
+            LIMIT ?
+        """, (cutoff_str, limit))
+        rows = cursor.fetchall()
+        return [
+            {
+                "_id": r[0],
+                "user_id": r[0],
+                "first_name": r[1] or "",
+                "last_name": r[2] or "",
+                "username": r[3] or "",
+                "joined_at": r[4] or "",
+                "message_count": r[5] or 0,
+                "last_message_at": r[6]
+            } for r in rows
+        ]
