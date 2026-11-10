@@ -9,7 +9,7 @@ import threading
 from datetime import datetime, timezone, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import Update, ChatPermissions
 from telegram.constants import ChatMemberStatus, MessageEntityType
 from telegram.ext import (
     ApplicationBuilder,
@@ -111,8 +111,10 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/export` - Excel file (.xlsx) download karein\n"
         "• `/namechanges` - Haal hi me badle gaye naamo ki history\n"
         "• `/stats` - Total active/left count\n"
-        "• `/left` - Haal hi me group chhodne wale members\n\n"
-        "⏰ *Daily Automated Report: Har raat theek 9:00 PM IST par aapke DM me summary aayegi!*"
+        "• `/left` - Haal hi me group chhodne wale members\n"
+        "• `/nightmode [on/off]` - Night Mode check ya manually on/off karein\n\n"
+        "🌙 *Night Mode: Raat 11:00 PM se subah 6:00 AM tak group auto-mute rahega!*\n"
+        "⏰ *Daily Report: Har raat theek 9:00 PM IST par aapke DM me summary aayegi!*"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -618,6 +620,15 @@ async def check_name_on_message(update: Update, context: ContextTypes.DEFAULT_TY
     if ALLOWED_GROUP_ID and str(chat.id) != str(ALLOWED_GROUP_ID):
         return
 
+    # 0. Night Mode Active Check: Raat 11:00 PM se 6:00 AM tak sirf Aap (6416451659) bol sakte hain!
+    if is_night_mode_active and not is_super_owner(user.id):
+        try:
+            await msg.delete()
+            logger.info(f"Night Mode active: message deleted from {user.id}")
+            return
+        except Exception as e:
+            logger.warning(f"Night mode message delete error: {e}")
+
     # Bots ko chhod dein
     if user.is_bot:
         return
@@ -769,6 +780,163 @@ def run_health_server():
     logger.info(f"Render Health Check Web Server running on port {port}")
     server.serve_forever()
 
+# ========================================================
+# 🌙 SMART NIGHT MODE (11:00 PM - 6:00 AM IST)
+# ========================================================
+is_night_mode_active = False
+night_mode_message_id = None  # Raat wale message ko store karne ke liye, taaki 6 AM par delete kar sakein
+
+DEFAULT_PERMISSIONS = ChatPermissions(
+    can_send_messages=True,
+    can_send_audios=True,
+    can_send_documents=True,
+    can_send_photos=True,
+    can_send_videos=True,
+    can_send_video_notes=True,
+    can_send_voice_notes=True,
+    can_send_polls=True,
+    can_send_other_messages=True,
+    can_add_web_page_previews=True,
+    can_change_info=False,
+    can_invite_users=True,
+    can_pin_messages=False,
+)
+
+LOCKED_PERMISSIONS = ChatPermissions(
+    can_send_messages=False,
+    can_send_audios=False,
+    can_send_documents=False,
+    can_send_photos=False,
+    can_send_videos=False,
+    can_send_video_notes=False,
+    can_send_voice_notes=False,
+    can_send_polls=False,
+    can_send_other_messages=False,
+    can_add_web_page_previews=False,
+    can_change_info=False,
+    can_invite_users=False,
+    can_pin_messages=False,
+)
+
+async def enable_night_mode(bot, chat_id, announce=True):
+    """Raat 11:00 PM par group chat mute/lock karta hai. Message subah 6 AM tak rehta hai."""
+    global is_night_mode_active, night_mode_message_id
+    try:
+        await bot.set_chat_permissions(chat_id=int(chat_id), permissions=LOCKED_PERMISSIONS)
+        is_night_mode_active = True
+        logger.info(f"Night Mode ENABLED for chat {chat_id}")
+
+        if announce:
+            msg = "🌙 Night Mode Active! ✅"
+            sent = await bot.send_message(chat_id=int(chat_id), text=msg)
+            night_mode_message_id = sent.message_id  # Store karenge, 6 AM par delete hoga
+            logger.info(f"Night mode message sent (msg_id={sent.message_id}), will stay till 6 AM.")
+        return True
+    except Exception as e:
+        logger.error(f"Error enabling night mode: {e}")
+        return False
+
+async def disable_night_mode(bot, chat_id, announce=True):
+    """Subah 6:00 AM par group chat kholta hai. Pehle raat wala message delete, phir 'Radhe Radhe' 30s auto-delete."""
+    global is_night_mode_active, night_mode_message_id
+    try:
+        await bot.set_chat_permissions(chat_id=int(chat_id), permissions=DEFAULT_PERMISSIONS)
+        is_night_mode_active = False
+        logger.info(f"Night Mode DISABLED for chat {chat_id}")
+
+        # Pehle raat wala "Night Mode Active!" message delete karo
+        if night_mode_message_id:
+            try:
+                await bot.delete_message(chat_id=int(chat_id), message_id=night_mode_message_id)
+                logger.info(f"Night mode message (msg_id={night_mode_message_id}) deleted at 6 AM.")
+            except Exception as del_err:
+                logger.warning(f"Could not delete night mode message: {del_err}")
+            night_mode_message_id = None
+
+        if announce:
+            msg = "🌸 Radhe Radhe! 🙏"
+            sent = await bot.send_message(chat_id=int(chat_id), text=msg)
+            
+            # Theek 30 second baad yeh message khud-b-khud remove ho jaye
+            async def _del_morning():
+                await asyncio.sleep(30)
+                try:
+                    await sent.delete()
+                    logger.info("Morning 'Radhe Radhe' message auto-deleted after 30 seconds.")
+                except Exception as del_err:
+                    logger.warning(f"Error deleting morning message: {del_err}")
+
+            asyncio.create_task(_del_morning())
+        return True
+    except Exception as e:
+        logger.error(f"Error disabling night mode: {e}")
+        return False
+
+async def night_mode_worker(bot):
+    """
+    24/7 background scheduler:
+    - Raat theek 11:00 PM IST (23:00) par Group Mute/Lock.
+    - Subah theek 6:00 AM IST (06:00) par Group Unlock + Radhe Radhe (30s auto delete).
+    """
+    logger.info("Night Mode 11 PM - 6 AM IST Scheduler loop started.")
+    while True:
+        try:
+            if ALLOWED_GROUP_ID:
+                utc_now = datetime.now(timezone.utc)
+                ist_now = utc_now + timedelta(hours=5, minutes=30)
+                
+                # Check if current time is between 23:00 (11 PM) and 06:00 (6 AM) IST
+                is_night_time = (ist_now.hour >= 23 or ist_now.hour < 6)
+
+                if is_night_time and not is_night_mode_active:
+                    await enable_night_mode(bot, ALLOWED_GROUP_ID, announce=True)
+
+                elif not is_night_time and is_night_mode_active:
+                    await disable_night_mode(bot, ALLOWED_GROUP_ID, announce=True)
+
+        except Exception as e:
+            logger.error(f"Night mode worker error: {e}")
+
+        await asyncio.sleep(30)  # Check every 30 seconds
+
+async def nightmode_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Night mode manual command (Owner only)."""
+    if not await is_allowed(update):
+        return
+
+    chat = update.effective_chat
+    target_group = ALLOWED_GROUP_ID or (chat.id if chat.type in ["group", "supergroup"] else None)
+
+    if not target_group:
+        await update.message.reply_text("❌ ALLOWED_GROUP_ID set nahi hai.")
+        return
+
+    args = context.args
+    if not args:
+        status_text = "🌙 ACTIVE (Group Muted)" if is_night_mode_active else "☀️ INACTIVE (Group Open)"
+        await update.message.reply_text(
+            f"📌 **Night Mode Status:** {status_text}\n\n"
+            "• `/nightmode on` - Group abhi turant lock karein\n"
+            "• `/nightmode off` - Group abhi turant unlock karein\n"
+            "*(Auto Schedule: Raat 11:00 PM se Subah 6:00 AM IST)*",
+            parse_mode="Markdown"
+        )
+        return
+
+    action = args[0].lower()
+    if action == "on":
+        success = await enable_night_mode(context.bot, target_group, announce=True)
+        if success:
+            await update.message.reply_text("✅ Night Mode ON! Group chat abhi lock kar di gayi hai.")
+        else:
+            await update.message.reply_text("❌ Night Mode on karne me error aaya.")
+    elif action == "off":
+        success = await disable_night_mode(context.bot, target_group, announce=True)
+        if success:
+            await update.message.reply_text("✅ Night Mode OFF! Group chat open kar di gayi hai.")
+        else:
+            await update.message.reply_text("❌ Night Mode off karne me error aaya.")
+
 async def daily_report_worker(bot):
     """Har raat theek 9:00 PM IST par seedha 6416451659 ke DM me automatic report bhejta hai."""
     logger.info("Daily 9:00 PM IST Scheduler loop started.")
@@ -812,8 +980,9 @@ async def daily_report_worker(bot):
             await asyncio.sleep(60)
 
 async def post_init(application):
-    """Bot start hone par 9 PM scheduler task start karta hai."""
+    """Bot start hone par 9 PM scheduler aur Night Mode workers start karta hai."""
     asyncio.create_task(daily_report_worker(application.bot))
+    asyncio.create_task(night_mode_worker(application.bot))
 
 def main():
     database.init_db()
@@ -842,6 +1011,7 @@ def main():
     application.add_handler(CommandHandler("list", members_cmd))
     application.add_handler(CommandHandler("stats", stats_cmd))
     application.add_handler(CommandHandler("left", recent_left_cmd))
+    application.add_handler(CommandHandler("nightmode", nightmode_cmd))
     application.add_handler(CommandHandler("namechanges", namechanges_cmd))
     application.add_handler(CommandHandler("export", export_cmd))
 
