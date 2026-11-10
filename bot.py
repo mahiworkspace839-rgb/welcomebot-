@@ -1461,11 +1461,16 @@ async def enable_night_mode(bot, chat_id, announce=True):
             logger.warning(f"Could not set partner permissions: {partner_err}")
 
         if announce:
-            msg = "🌙 Night Mode Active! ✅"
-            sent = await bot.send_message(chat_id=int(chat_id), text=msg)
-            night_mode_message_id = sent.message_id  # Store karenge, 6 AM par delete hoga
-            database.set_bot_state("night_mode_msg_id", str(sent.message_id))
-            logger.info(f"Night mode message sent (msg_id={sent.message_id}), saved to DB for 6 AM deletion.")
+            # Agar pehle se koi night mode message active hai toh doosra duplicate mat bhejo
+            existing_msg_id = night_mode_message_id or database.get_bot_state("night_mode_msg_id")
+            if not existing_msg_id:
+                msg = "🌙 Night Mode Active! ✅"
+                sent = await bot.send_message(chat_id=int(chat_id), text=msg)
+                night_mode_message_id = sent.message_id  # Store karenge, 6 AM par delete hoga
+                database.set_bot_state("night_mode_msg_id", str(sent.message_id))
+                logger.info(f"Night mode message sent (msg_id={sent.message_id}), saved to DB for 6 AM deletion.")
+            else:
+                logger.info(f"Night mode notice already exists in chat (msg_id={existing_msg_id}), skipping duplicate announcement.")
         return True
     except Exception as e:
         logger.error(f"Error enabling night mode: {e}")
