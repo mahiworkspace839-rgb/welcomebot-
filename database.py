@@ -266,7 +266,7 @@ def check_name_change(user_id, current_first, current_last, current_username):
     """
     User ka current naam database me stored naam se compare karta hai.
     Agar naam badla hai toh name_changes me log karta hai aur change details return karta hai.
-    Agar nahi badla toh None return karta hai.
+    Agar user pehli baar dikha hai, toh uska record create karta hai bina jhoota alert bheje!
     """
     now_str = get_ist_now().strftime("%Y-%m-%d %I:%M:%S %p")
 
@@ -274,11 +274,36 @@ def check_name_change(user_id, current_first, current_last, current_username):
         try:
             doc = mongo_col.find_one({"_id": user_id})
             if not doc:
+                # User pehli baar message kiya ya pehli baar track hua -> Initial state save karo
+                mongo_col.insert_one({
+                    "_id": user_id,
+                    "first_name": current_first,
+                    "last_name": current_last,
+                    "username": current_username,
+                    "status": "active",
+                    "joined_at": "Existing Member",
+                    "updated_at": now_str,
+                    "message_count": 0,
+                    "last_message_at": None
+                })
                 return None
 
             old_first = doc.get("first_name") or ""
             old_last = doc.get("last_name") or ""
             old_uname = doc.get("username") or ""
+
+            # Agar purana data hi blank/missing tha, toh yeh 'name change' nahi hai, bas data fill ho raha hai
+            if not old_first and not old_last and not old_uname:
+                mongo_col.update_one(
+                    {"_id": user_id},
+                    {"$set": {
+                        "first_name": current_first,
+                        "last_name": current_last,
+                        "username": current_username,
+                        "updated_at": now_str
+                    }}
+                )
+                return None
 
             name_changed = (old_first != (current_first or "")) or (old_last != (current_last or ""))
             uname_changed = (old_uname != (current_username or ""))
@@ -331,9 +356,24 @@ def check_name_change(user_id, current_first, current_last, current_username):
         cursor.execute("SELECT first_name, last_name, username FROM members WHERE user_id = ?", (user_id,))
         row = cursor.fetchone()
         if not row:
+            # User record nahi mila -> Pehli baar aaya hai, record insert karo bina alert ke
+            cursor.execute("""
+                INSERT OR IGNORE INTO members (user_id, first_name, last_name, username, status, joined_at, updated_at)
+                VALUES (?, ?, ?, ?, 'active', 'Existing Member', ?)
+            """, (user_id, current_first, current_last, current_username, now_str))
+            conn.commit()
             return None
 
         old_first, old_last, old_uname = row[0] or "", row[1] or "", row[2] or ""
+
+        # Agar purana record empty tha
+        if not old_first and not old_last and not old_uname:
+            cursor.execute("""
+                UPDATE members SET first_name = ?, last_name = ?, username = ?, updated_at = ?
+                WHERE user_id = ?
+            """, (current_first, current_last, current_username, now_str, user_id))
+            conn.commit()
+            return None
 
         name_changed = (old_first != (current_first or "")) or (old_last != (current_last or ""))
         uname_changed = (old_uname != (current_username or ""))
