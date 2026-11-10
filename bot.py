@@ -133,6 +133,7 @@ async def is_allowed(update: Update) -> bool:
 
 def get_control_panel_keyboard() -> InlineKeyboardMarkup:
     """Owner ke liye button control panel keyboard create karta hai."""
+    quiz_btn_text = "🟢 Turn Quiz Mode OFF (Chat Unlock)" if is_chat_manually_locked else "🔴 Turn Quiz Mode ON (Chat Lock)"
     night_btn_text = "☀️ Turn Night Mode OFF" if is_night_mode_active else "🌙 Turn Night Mode ON"
     keyboard = [
         [
@@ -152,6 +153,9 @@ def get_control_panel_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🔴 Recent Left", callback_data="btn_left"),
         ],
         [
+            InlineKeyboardButton(quiz_btn_text, callback_data="btn_toggle_quiz"),
+        ],
+        [
             InlineKeyboardButton(night_btn_text, callback_data="btn_toggle_night"),
         ],
         [
@@ -169,12 +173,16 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_allowed(update):
         return  # Silent ignore
 
+    quiz_status = "`ACTIVE (Chat Locked)` 🔴" if is_chat_manually_locked else "`INACTIVE (Chat Open)` 🟢"
+    night_status = "`ACTIVE (Group Muted)` 🔒" if is_night_mode_active else "`INACTIVE (Group Open)` 🔓"
+
     panel_text = (
         "👑 **SUPER OWNER CONTROL DASHBOARD** 👑\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         "Namaste Malik! Aap apne group ka poora hisaab-kitaab aur security "
         "seedha neeche diye gaye buttons se one-click me control kar sakte hain:\n\n"
-        f"🌙 **Night Mode Status:** {'`ACTIVE (Group Muted)` 🔒' if is_night_mode_active else '`INACTIVE (Group Open)` 🔓'}\n"
+        f"🎯 **Quiz Mode Status:** {quiz_status}\n"
+        f"🌙 **Night Mode Status:** {night_status}\n\n"
         "👇 **Neeche kisi bhi button par click karein:**"
     )
     await update.message.reply_text(
@@ -662,6 +670,7 @@ async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def panel_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Button click hone par actions handle karta hai."""
+    global is_chat_manually_locked, quiz_lock_message_id, is_night_mode_active, night_mode_message_id
     query = update.callback_query
     if not query:
         return
@@ -677,12 +686,15 @@ async def panel_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     # 1. Refresh Button
     if data == "btn_refresh":
         await query.answer("🔄 Dashboard refresh ho raha hai...")
+        quiz_status = "`ACTIVE (Chat Locked)` 🔴" if is_chat_manually_locked else "`INACTIVE (Chat Open)` 🟢"
+        night_status = "`ACTIVE (Group Muted)` 🔒" if is_night_mode_active else "`INACTIVE (Group Open)` 🔓"
         panel_text = (
             "👑 **SUPER OWNER CONTROL DASHBOARD** 👑\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
             "Namaste Malik! Aap apne group ka poora hisaab-kitaab aur security "
             "seedha neeche diye gaye buttons se one-click me control kar sakte hain:\n\n"
-            f"🌙 **Night Mode Status:** {'`ACTIVE (Group Muted)` 🔒' if is_night_mode_active else '`INACTIVE (Group Open)` 🔓'}\n"
+            f"🎯 **Quiz Mode Status:** {quiz_status}\n"
+            f"🌙 **Night Mode Status:** {night_status}\n"
             f"🕒 **Last Refreshed:** `{datetime.now().strftime('%H:%M:%S')}`\n\n"
             "👇 **Neeche kisi bhi button par click karein:**"
         )
@@ -855,7 +867,64 @@ async def panel_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             text += f"{idx}. **{name}** {username_str}\n   🕒 Left: `{left_time}` | 🆔 `{uid}`\n\n"
         await query.message.reply_text(text, parse_mode="Markdown")
 
-    # 10. Night Mode Toggle Button (One-click ON/OFF)
+    # 10. Quiz Mode Toggle Button (Lock / Unlock on demand for quiz)
+    elif data == "btn_toggle_quiz":
+        if not target_group:
+            await query.answer("❌ ALLOWED_GROUP_ID set nahi hai!", show_alert=True)
+            return
+
+        if is_chat_manually_locked:
+            # Turn OFF (Unlock chat)
+            is_chat_manually_locked = False
+            await unlock_chat(
+                context.bot,
+                target_group,
+                delete_msg_id=quiz_lock_message_id,
+                announce_text="🟢 **Quiz Samapt!** Group chat khol di gayi hai, aap sab message bhej sakte hain. ✅",
+                auto_del_delay=30
+            )
+            quiz_lock_message_id = None
+            await query.answer("🟢 Quiz Mode OFF! Group chat khul gayi.", show_alert=True)
+        else:
+            # Turn ON (Lock chat)
+            is_chat_manually_locked = True
+            announce_text = (
+                "🎯 **Quiz Time Active!** 🔴\n\n"
+                "Group chat ko temporarily mute/lock kar diya gaya hai taaki bina kisi disturbance ke Quiz smoothly chal sake.\n"
+                "Quiz poora hote hi chat wapas khol di jayegi!"
+            )
+            success, msg_id = await lock_chat(
+                context.bot,
+                target_group,
+                announce_text=announce_text,
+                partner_allow=True
+            )
+            quiz_lock_message_id = msg_id
+            await query.answer("🔴 Quiz Mode ON! Group chat lock ho gayi.", show_alert=True)
+
+        # Update button text on dashboard
+        try:
+            quiz_status = "`ACTIVE (Chat Locked)` 🔴" if is_chat_manually_locked else "`INACTIVE (Chat Open)` 🟢"
+            night_status = "`ACTIVE (Group Muted)` 🔒" if is_night_mode_active else "`INACTIVE (Group Open)` 🔓"
+            panel_text = (
+                "👑 **SUPER OWNER CONTROL DASHBOARD** 👑\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                "Namaste Malik! Aap apne group ka poora hisaab-kitaab aur security "
+                "seedha neeche diye gaye buttons se one-click me control kar sakte hain:\n\n"
+                f"🎯 **Quiz Mode Status:** {quiz_status}\n"
+                f"🌙 **Night Mode Status:** {night_status}\n"
+                f"🕒 **Last Updated:** `{datetime.now().strftime('%H:%M:%S')}`\n\n"
+                "👇 **Neeche kisi bhi button par click karein:**"
+            )
+            await query.edit_message_text(
+                panel_text,
+                reply_markup=get_control_panel_keyboard(),
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
+
+    # 11. Night Mode Toggle Button (One-click ON/OFF)
     elif data == "btn_toggle_night":
         if not target_group:
             await query.answer("❌ ALLOWED_GROUP_ID set nahi hai!", show_alert=True)
@@ -872,12 +941,15 @@ async def panel_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
         # Update button text on dashboard
         try:
+            quiz_status = "`ACTIVE (Chat Locked)` 🔴" if is_chat_manually_locked else "`INACTIVE (Chat Open)` 🟢"
+            night_status = "`ACTIVE (Group Muted)` 🔒" if is_night_mode_active else "`INACTIVE (Group Open)` 🔓"
             panel_text = (
                 "👑 **SUPER OWNER CONTROL DASHBOARD** 👑\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n"
                 "Namaste Malik! Aap apne group ka poora hisaab-kitaab aur security "
                 "seedha neeche diye gaye buttons se one-click me control kar sakte hain:\n\n"
-                f"🌙 **Night Mode Status:** {'`ACTIVE (Group Muted)` 🔒' if is_night_mode_active else '`INACTIVE (Group Open)` 🔓'}\n"
+                f"🎯 **Quiz Mode Status:** {quiz_status}\n"
+                f"🌙 **Night Mode Status:** {night_status}\n"
                 f"🕒 **Last Updated:** `{datetime.now().strftime('%H:%M:%S')}`\n\n"
                 "👇 **Neeche kisi bhi button par click karein:**"
             )
@@ -1062,14 +1134,14 @@ async def check_name_on_message(update: Update, context: ContextTypes.DEFAULT_TY
     if ALLOWED_GROUP_ID and str(chat.id) != str(ALLOWED_GROUP_ID):
         return
 
-    # 0. Night Mode Active Check: Raat 11:00 PM se 6:00 AM tak sirf Aap (6416451659) bol sakte hain!
-    if is_night_mode_active and not is_super_owner(user.id):
+    # 0. Night Mode ya Quiz Mode Active Check: Lock hone par sirf Aap (6416451659) & Partner (8914751355) bol sakte hain!
+    if (is_night_mode_active or is_chat_manually_locked) and not (is_super_owner(user.id) or str(user.id) in LINK_ALLOWED_IDS):
         try:
             await msg.delete()
-            logger.info(f"Night Mode active: message deleted from {user.id}")
+            logger.info(f"Lock Mode active (Night={is_night_mode_active}, Quiz={is_chat_manually_locked}): message deleted from {user.id}")
             return
         except Exception as e:
-            logger.warning(f"Night mode message delete error: {e}")
+            logger.warning(f"Lock mode message delete error: {e}")
 
     # Bots ko chhod dein
     if user.is_bot:
@@ -1255,10 +1327,73 @@ def run_health_server():
     server.serve_forever()
 
 # ========================================================
-# 🌙 SMART NIGHT MODE (11:00 PM - 6:00 AM IST)
+# 🌙 SMART NIGHT MODE & 🎯 QUIZ CHAT LOCK
 # ========================================================
 is_night_mode_active = False
+is_chat_manually_locked = False
 night_mode_message_id = None  # Raat wale message ko store karne ke liye, taaki 6 AM par delete kar sakein
+quiz_lock_message_id = None   # Quiz lock message tracking
+
+async def lock_chat(bot, chat_id, announce_text=None, partner_allow=True):
+    """Group chat ko lock/mute karta hai."""
+    try:
+        await bot.set_chat_permissions(chat_id=int(chat_id), permissions=LOCKED_PERMISSIONS)
+        if partner_allow:
+            try:
+                partner_permissions = ChatPermissions(
+                    can_send_messages=True,
+                    can_send_audios=True,
+                    can_send_documents=True,
+                    can_send_photos=True,
+                    can_send_videos=True,
+                    can_send_video_notes=True,
+                    can_send_voice_notes=True,
+                    can_send_polls=True,
+                    can_send_other_messages=True,
+                    can_add_web_page_previews=True,
+                    can_invite_users=True,
+                )
+                await bot.restrict_chat_member(
+                    chat_id=int(chat_id),
+                    user_id=8914751355,
+                    permissions=partner_permissions,
+                )
+            except Exception as partner_err:
+                logger.warning(f"Could not set partner permissions: {partner_err}")
+
+        sent_msg_id = None
+        if announce_text:
+            sent = await bot.send_message(chat_id=int(chat_id), text=announce_text)
+            sent_msg_id = sent.message_id
+        return True, sent_msg_id
+    except Exception as e:
+        logger.error(f"Error locking chat: {e}")
+        return False, None
+
+async def unlock_chat(bot, chat_id, delete_msg_id=None, announce_text=None, auto_del_delay=30):
+    """Group chat ko unlock/open karta hai."""
+    try:
+        await bot.set_chat_permissions(chat_id=int(chat_id), permissions=DEFAULT_PERMISSIONS)
+        if delete_msg_id:
+            try:
+                await bot.delete_message(chat_id=int(chat_id), message_id=delete_msg_id)
+            except Exception as del_err:
+                logger.warning(f"Could not delete lock message: {del_err}")
+
+        if announce_text:
+            sent = await bot.send_message(chat_id=int(chat_id), text=announce_text)
+            if auto_del_delay:
+                async def _del():
+                    await asyncio.sleep(auto_del_delay)
+                    try:
+                        await sent.delete()
+                    except Exception:
+                        pass
+                asyncio.create_task(_del())
+        return True
+    except Exception as e:
+        logger.error(f"Error unlocking chat: {e}")
+        return False
 
 DEFAULT_PERMISSIONS = ChatPermissions(
     can_send_messages=True,
@@ -1298,6 +1433,7 @@ async def enable_night_mode(bot, chat_id, announce=True):
     try:
         await bot.set_chat_permissions(chat_id=int(chat_id), permissions=LOCKED_PERMISSIONS)
         is_night_mode_active = True
+        database.set_bot_state("night_mode_active", "true")
         logger.info(f"Night Mode ENABLED for chat {chat_id}")
 
         # Partner (8914751355) ko raat me bhi message bhejne ki permission do
@@ -1328,7 +1464,8 @@ async def enable_night_mode(bot, chat_id, announce=True):
             msg = "🌙 Night Mode Active! ✅"
             sent = await bot.send_message(chat_id=int(chat_id), text=msg)
             night_mode_message_id = sent.message_id  # Store karenge, 6 AM par delete hoga
-            logger.info(f"Night mode message sent (msg_id={sent.message_id}), will stay till 6 AM.")
+            database.set_bot_state("night_mode_msg_id", str(sent.message_id))
+            logger.info(f"Night mode message sent (msg_id={sent.message_id}), saved to DB for 6 AM deletion.")
         return True
     except Exception as e:
         logger.error(f"Error enabling night mode: {e}")
@@ -1340,16 +1477,20 @@ async def disable_night_mode(bot, chat_id, announce=True):
     try:
         await bot.set_chat_permissions(chat_id=int(chat_id), permissions=DEFAULT_PERMISSIONS)
         is_night_mode_active = False
+        database.set_bot_state("night_mode_active", "false")
         logger.info(f"Night Mode DISABLED for chat {chat_id}")
 
-        # Pehle raat wala "Night Mode Active!" message delete karo
-        if night_mode_message_id:
+        # Pehle DB se check karo agar restart hua tha
+        target_del_id = night_mode_message_id or database.get_bot_state("night_mode_msg_id")
+
+        if target_del_id:
             try:
-                await bot.delete_message(chat_id=int(chat_id), message_id=night_mode_message_id)
-                logger.info(f"Night mode message (msg_id={night_mode_message_id}) deleted at 6 AM.")
+                await bot.delete_message(chat_id=int(chat_id), message_id=int(target_del_id))
+                logger.info(f"Night mode message (msg_id={target_del_id}) deleted at 6 AM.")
             except Exception as del_err:
                 logger.warning(f"Could not delete night mode message: {del_err}")
             night_mode_message_id = None
+            database.set_bot_state("night_mode_msg_id", "")
 
         if announce:
             msg = "🌸 Radhe Radhe! 🙏"
@@ -1434,6 +1575,64 @@ async def nightmode_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("✅ Night Mode OFF! Group chat open kar di gayi hai.")
         else:
             await update.message.reply_text("❌ Night Mode off karne me error aaya.")
+
+async def quizmode_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Quiz mode manual command (/quiz on / off / lock / unlock)."""
+    global is_chat_manually_locked, quiz_lock_message_id
+    if not await is_allowed(update):
+        return
+
+    chat = update.effective_chat
+    target_group = ALLOWED_GROUP_ID or (chat.id if chat.type in ["group", "supergroup"] else None)
+
+    if not target_group:
+        await update.message.reply_text("❌ ALLOWED_GROUP_ID set nahi hai.")
+        return
+
+    args = context.args
+    if not args:
+        status_text = "🔴 ACTIVE (Chat Locked)" if is_chat_manually_locked else "🟢 INACTIVE (Chat Open)"
+        await update.message.reply_text(
+            f"🎯 **Quiz Mode Status:** {status_text}\n\n"
+            "• `/quiz on` ya `/quiz lock` - Quiz ke liye chat lock karein\n"
+            "• `/quiz off` ya `/quiz unlock` - Quiz khatam hone par chat unlock karein",
+            parse_mode="Markdown"
+        )
+        return
+
+    action = args[0].lower()
+    if action in ["on", "lock"]:
+        is_chat_manually_locked = True
+        announce_text = (
+            "🎯 **Quiz Time Active!** 🔴\n\n"
+            "Group chat ko temporarily mute/lock kar diya gaya hai taaki bina kisi disturbance ke Quiz smoothly chal sake.\n"
+            "Quiz poora hote hi chat wapas khol di jayegi!"
+        )
+        success, msg_id = await lock_chat(
+            context.bot,
+            target_group,
+            announce_text=announce_text,
+            partner_allow=True
+        )
+        quiz_lock_message_id = msg_id
+        if success:
+            await update.message.reply_text("✅ **Quiz Mode ON!** Group chat successfully lock kar di gayi hai.")
+        else:
+            await update.message.reply_text("❌ Group chat lock karne me error aaya.")
+    elif action in ["off", "unlock"]:
+        is_chat_manually_locked = False
+        success = await unlock_chat(
+            context.bot,
+            target_group,
+            delete_msg_id=quiz_lock_message_id,
+            announce_text="🟢 **Quiz Samapt!** Group chat khol di gayi hai, aap sab message bhej sakte hain. ✅",
+            auto_del_delay=30
+        )
+        quiz_lock_message_id = None
+        if success:
+            await update.message.reply_text("✅ **Quiz Mode OFF!** Group chat successfully unlock kar di gayi hai.")
+        else:
+            await update.message.reply_text("❌ Group chat unlock karne me error aaya.")
 
 async def daily_report_worker(bot):
     """Har raat theek 9:00 PM IST par seedha 6416451659 ke DM me automatic report bhejta hai."""
@@ -1527,6 +1726,16 @@ async def weekly_report_worker(bot):
 
 async def post_init(application):
     """Bot start hone par 9 PM scheduler, Monday weekly scheduler aur Night Mode workers start karta hai."""
+    # DB se check karo agar restart hone se pehle night mode ON tha
+    global is_night_mode_active, night_mode_message_id, is_chat_manually_locked
+    saved_nm = database.get_bot_state("night_mode_active")
+    if saved_nm == "true":
+        is_night_mode_active = True
+        saved_msg_id = database.get_bot_state("night_mode_msg_id")
+        if saved_msg_id and saved_msg_id.isdigit():
+            night_mode_message_id = int(saved_msg_id)
+        logger.info(f"Bot restart: Night Mode state restored from DB (msg_id={night_mode_message_id})")
+
     asyncio.create_task(daily_report_worker(application.bot))
     asyncio.create_task(weekly_report_worker(application.bot))
     asyncio.create_task(night_mode_worker(application.bot))
@@ -1559,6 +1768,7 @@ def main():
     application.add_handler(CommandHandler("stats", stats_cmd))
     application.add_handler(CommandHandler("left", recent_left_cmd))
     application.add_handler(CommandHandler("nightmode", nightmode_cmd))
+    application.add_handler(CommandHandler("quiz", quizmode_cmd))
     application.add_handler(CommandHandler("namechanges", namechanges_cmd))
     application.add_handler(CommandHandler("weekly", weekly_cmd))
     application.add_handler(CommandHandler("cleanup", cleanup_cmd))

@@ -62,9 +62,12 @@ if MONGO_URI:
 mongo_name_col = None
 # Warnings collection
 mongo_warn_col = None
+# Bot state / settings collection (Night mode msg ID etc ko restart ke baad bhi yaad rakhne ke liye)
+mongo_state_col = None
 if mongo_db is not None:
     mongo_name_col = mongo_db["name_changes"]
     mongo_warn_col = mongo_db["warnings"]
+    mongo_state_col = mongo_db["bot_state"]
 
 def init_db():
     """Database tables/collections initialize karta hai."""
@@ -126,6 +129,12 @@ def init_db():
                 user_id INTEGER,
                 reason TEXT,
                 warned_at TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS bot_state (
+                key TEXT PRIMARY KEY,
+                value TEXT
             )
         """)
         conn.commit()
@@ -1046,3 +1055,47 @@ def get_ghost_members(days=30, limit=50):
                 "last_message_at": r[6]
             } for r in rows
         ]
+
+
+# ========================================================
+# 💾 BOT PERSISTENT STATE (Restart hone par bhi data yaad rakhna)
+# ========================================================
+
+def set_bot_state(key: str, value):
+    """Kisi bhi value (jaise night_mode_msg_id) ko permanent save karta hai."""
+    val_str = str(value) if value is not None else ""
+    if mongo_state_col is not None:
+        try:
+            mongo_state_col.update_one(
+                {"_id": key},
+                {"$set": {"value": val_str, "updated_at": get_ist_now().strftime("%Y-%m-%d %I:%M:%S %p")}},
+                upsert=True
+            )
+            return True
+        except Exception as e:
+            print(f"MongoDB set_bot_state error: {e}")
+
+    with sqlite3.connect(SQLITE_DB) as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO bot_state (key, value) VALUES (?, ?)", (key, val_str))
+        conn.commit()
+    return True
+
+def get_bot_state(key: str, default=None):
+    """Permanent saved value ko fetch karta hai."""
+    if mongo_state_col is not None:
+        try:
+            doc = mongo_state_col.find_one({"_id": key})
+            if doc and doc.get("value"):
+                return doc["value"]
+            return default
+        except Exception as e:
+            print(f"MongoDB get_bot_state error: {e}")
+
+    with sqlite3.connect(SQLITE_DB) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM bot_state WHERE key = ?", (key,))
+        row = cursor.fetchone()
+        if row and row[0]:
+            return row[0]
+    return default
