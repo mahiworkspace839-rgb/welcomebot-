@@ -40,6 +40,41 @@ SUPER_OWNER_ID = "6416451659"
 # 2. Links Whitelist (Sirf Aap aur 8914751355 link send kar sakte hain)
 LINK_ALLOWED_IDS = {"6416451659", "8914751355"}
 
+# 3. Bad Words / Gaali Filter - Yeh words milenge toh turant delete + auto-warn
+BAD_WORDS = {
+    # Hindi gaali words
+    "madarchod", "bhenchod", "chutiya", "bhosdike", "bhosdiwale", "bhosdiwala",
+    "gandu", "lodu", "laude", "lawde", "lode", "randi", "harami", "haramkhor",
+    "kutte", "kuttiya", "suar", "saala", "saali", "ullu", "gadha",
+    "kamina", "kameena", "kameeni", "kamini", "bhosda", "chut", "lund",
+    "tatte", "jhant", "gaand", "gand", "mc", "bc", "bsdk", "bkl",
+    "mkc", "mkb", "betichod", "behenchod", "teri maa", "teri ma",
+    "madar", "maderchod", "bhen ke", "bhen ka",
+    # English bad words
+    "fuck", "shit", "bitch", "asshole", "bastard", "dick", "pussy",
+    "motherfucker", "wtf", "stfu", "idiot", "stupid",
+}
+
+# Pending cleanup confirmations store
+pending_cleanup = {}
+
+def contains_bad_word(text: str) -> bool:
+    """Check karta hai ki message me koi gaali/bad word hai ya nahi."""
+    if not text:
+        return False
+    text_lower = text.lower()
+    # Remove special characters for better matching
+    cleaned = re.sub(r'[^a-zA-Z\u0900-\u097F\s]', '', text_lower)
+    words = cleaned.split()
+    for word in words:
+        if word in BAD_WORDS:
+            return True
+    # Also check without splitting (for combined words like "bc" in a sentence)
+    for bw in BAD_WORDS:
+        if bw in text_lower:
+            return True
+    return False
+
 def is_super_owner(user_id: int) -> bool:
     """Check karta hai ki user sirf aur sirf MAIN OWNER (6416451659) hai."""
     uid = str(user_id)
@@ -112,9 +147,13 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/namechanges` - Haal hi me badle gaye naamo ki history\n"
         "• `/stats` - Total active/left count\n"
         "• `/left` - Haal hi me group chhodne wale members\n"
+        "• `/weekly` - Pichle 7 dino ki performance report aur top members\n"
+        "• `/cleanup [days]` - Ghost/Silent members dekhna aur kick karna\n"
         "• `/nightmode [on/off]` - Night Mode check ya manually on/off karein\n\n"
         "🌙 *Night Mode: Raat 11:00 PM se subah 6:00 AM tak group auto-mute rahega!*\n"
-        "⏰ *Daily Report: Har raat theek 9:00 PM IST par aapke DM me summary aayegi!*"
+        "⏰ *Daily Report: Har raat theek 9:00 PM IST par DM me report aayegi!*\n"
+        "📅 *Weekly Report: Har Monday subah 9:00 AM IST par DM me summary aayegi!*\n"
+        "🤬 *Anti-Abuse: Gaali/Bad words wale message turant delete + 3 warning par Kick!*"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -259,6 +298,109 @@ async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔄 **Name Changes:** {s['name_changes']}\n"
         f"👥 **Total Active Members:** {s['active_total']}\n"
         f"📁 **Total Tracked in DB:** {s['total_members']}\n"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def weekly_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pichle 7 dino ki weekly report (Super Owner only)."""
+    if not await is_allowed(update):
+        return
+
+    w = database.get_weekly_summary_stats()
+    top_text = ""
+    if w.get("top_5"):
+        top_text = "\n\n🏆 **Top 5 Active Chatters of the Week:**\n"
+        for i, m in enumerate(w["top_5"], 1):
+            top_text += f"{i}. {m.get('first_name', 'User')} — `{m.get('message_count', 0)} msgs`\n"
+
+    text = (
+        f"📅 **Weekly Performance Report ({w['from_date']} se {w['to_date']}):**\n\n"
+        f"🟢 **Hafte ke Naye Joins:** {w['joins']}\n"
+        f"🔴 **Hafte ke Left Members:** {w['left']}\n"
+        f"🔄 **Name Changes:** {w['name_changes']}\n"
+        f"👥 **Total Active Members:** {w['active_total']}\n"
+        f"📁 **Total Tracked in DB:** {w['total_members']}"
+        f"{top_text}\n\n"
+        "Full Excel download karne ke liye `/export` bhejein."
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def cleanup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    👻 Ghost Member Cleaner (/cleanup [days]):
+    30 din (ya diye gaye din) se silent/inactive members ki list nikalta hai.
+    Confirm karne par unhe auto-kick kar sakta hai.
+    """
+    if not await is_allowed(update):
+        return
+
+    chat = update.effective_chat
+    target_group = ALLOWED_GROUP_ID or (chat.id if chat.type in ["group", "supergroup"] else None)
+
+    days = 30
+    if context.args:
+        try:
+            if context.args[0].lower() == "confirm":
+                # KICK EXECUTION
+                if str(update.effective_user.id) not in pending_cleanup:
+                    await update.message.reply_text("❌ Koi pending cleanup list nahi hai. Pehle `/cleanup` chalayein.")
+                    return
+
+                ghost_list = pending_cleanup.pop(str(update.effective_user.id))
+                if not target_group:
+                    await update.message.reply_text("❌ ALLOWED_GROUP_ID set nahi hai.")
+                    return
+
+                progress_msg = await update.message.reply_text(f"⏳ Cleanup shuru ho raha hai... Total {len(ghost_list)} ghost members.")
+                kicked = 0
+                failed = 0
+
+                for m in ghost_list:
+                    uid = m.get("user_id") or m.get("_id")
+                    if str(uid) in LINK_ALLOWED_IDS or is_super_owner(uid):
+                        continue  # Safe whitelist
+                    try:
+                        await context.bot.ban_chat_member(chat_id=int(target_group), user_id=int(uid))
+                        await context.bot.unban_chat_member(chat_id=int(target_group), user_id=int(uid)) # Ban + Unban = Kick
+                        kicked += 1
+                        await asyncio.sleep(0.5)  # Flood limit se bachne ke liye
+                    except Exception as e:
+                        failed += 1
+                        logger.warning(f"Could not kick ghost member {uid}: {e}")
+
+                await progress_msg.edit_text(
+                    f"✅ **Ghost Member Cleanup Safal!**\n\n"
+                    f"👢 **Kicked Members:** {kicked}\n"
+                    f"⚠️ **Failed / Already Left:** {failed}"
+                )
+                return
+            else:
+                days = int(context.args[0])
+        except ValueError:
+            pass
+
+    ghosts = database.get_ghost_members(days=days, limit=30)
+    if not ghosts:
+        await update.message.reply_text(f"🎉 Pichle {days} din se koi bhi Ghost/Silent member nahi mila! Sab active hain.")
+        return
+
+    # Pending store me save karo
+    pending_cleanup[str(update.effective_user.id)] = ghosts
+
+    text = f"👻 **Ghost / Silent Members (Pichle {days} Din Se):**\n"
+    text += f"Total {len(ghosts)} members mile jo itne din se chup hain:\n\n"
+    for idx, m in enumerate(ghosts[:15], 1):
+        name = f"{m.get('first_name', '')} {m.get('last_name', '')}".strip() or "No Name"
+        uname = f"(@{m.get('username')})" if m.get("username") else ""
+        text += f"{idx}. **{name}** {uname} — ID: `{m.get('user_id') or m.get('_id')}`\n"
+
+    if len(ghosts) > 15:
+        text += f"\n...aur {len(ghosts) - 15} aur members.\n"
+
+    text += (
+        "\n⚠️ **Kya aap in sabko group se kick/remove karna chahte hain?**\n"
+        "👉 Confirm karne ke liye type karein: `/cleanup confirm`\n"
+        "*(Note: Aap aur aapke partner whitelist me surakshit rahenge)*"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -670,6 +812,38 @@ async def check_name_on_message(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception as e:
             logger.error(f"Error deleting forwarded message: {e}")
 
+    # 4. 🤬 Bad Words / Gaali Filter (Turant delete + auto-warn + 3 warnings par auto-mute/kick)
+    text_to_check = msg.text or msg.caption or ""
+    if text_to_check and contains_bad_word(text_to_check):
+        try:
+            await msg.delete()
+            warn_count = database.add_warning(user.id, reason="Abusive Language / Gaali")
+            user_mention = f"[{user.first_name}](tg://user?id={user.id})"
+            logger.info(f"Bad word deleted from user {user.id} ({user.first_name}). Warning #{warn_count}")
+
+            if warn_count >= 3:
+                # 3 warnings ho gayi -> member ko group se kick/mute kar do
+                try:
+                    await chat.ban_member(user_id=user.id)
+                    await chat.unban_member(user_id=user.id) # Ban + unban = Kick
+                    await send_auto_delete_warning(
+                        chat,
+                        f"🚫 {user_mention} ko group se **Remove (Kick)** kar diya gaya hai (3/3 Warnings poori ho gayi)!",
+                        delay=20
+                    )
+                except Exception as kick_err:
+                    logger.error(f"Error kicking warned user: {kick_err}")
+            else:
+                await send_auto_delete_warning(
+                    chat,
+                    f"🤬 {user_mention}, is group me apshabd / gaali dena sakht mana hai!\n"
+                    f"⚠️ **Warning: {warn_count}/3** (3 warnings par automatic remove ho jaoge)",
+                    delay=12
+                )
+            return
+        except Exception as e:
+            logger.error(f"Error handling bad word: {e}")
+
 async def check_name_on_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Kisi message par Emoji Reaction aane par bhi name change check karein."""
     reaction = update.message_reaction
@@ -1003,9 +1177,58 @@ async def daily_report_worker(bot):
             logger.error(f"Daily report scheduler error: {e}")
             await asyncio.sleep(60)
 
+async def weekly_report_worker(bot):
+    """Har Monday subah theek 9:00 AM IST par seedha 6416451659 ke DM me weekly summary bhejta hai."""
+    logger.info("Weekly Monday 9:00 AM IST Scheduler loop started.")
+    while True:
+        try:
+            utc_now = datetime.now(timezone.utc)
+            ist_now = utc_now + timedelta(hours=5, minutes=30)
+
+            # Check if today is Monday (weekday() == 0) and time is 09:00 AM
+            days_ahead = (0 - ist_now.weekday()) % 7
+            target = ist_now.replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(days=days_ahead)
+            if ist_now >= target:
+                target += timedelta(days=7)
+
+            wait_secs = (target - ist_now).total_seconds()
+            logger.info(f"Next Monday 9 AM IST weekly report scheduled in {int(wait_secs)} seconds ({target.strftime('%Y-%m-%d %H:%M:%S')} IST)")
+            await asyncio.sleep(wait_secs)
+
+            # Send Weekly report to Owner
+            w = database.get_weekly_summary_stats()
+            top_text = ""
+            if w.get("top_5"):
+                top_text = "\n\n🏆 **Top 5 Active Chatters of the Week:**\n"
+                for i, m in enumerate(w["top_5"], 1):
+                    top_text += f"{i}. {m.get('first_name', 'User')} — `{m.get('message_count', 0)} msgs`\n"
+
+            weekly_text = (
+                f"📅 **Har Somwar (Monday) Weekly Summary Report:**\n"
+                f"🕒 *Period: {w['from_date']} se {w['to_date']}*\n\n"
+                f"🟢 **Hafte ke Naye Joins:** {w['joins']}\n"
+                f"🔴 **Hafte ke Left Members:** {w['left']}\n"
+                f"🔄 **Name Changes:** {w['name_changes']}\n"
+                f"👥 **Total Active Members:** {w['active_total']}\n"
+                f"📁 **Total Tracked in DB:** {w['total_members']}"
+                f"{top_text}\n"
+                "Poora detail report lene ke liye `/export` bhejein."
+            )
+            await bot.send_message(
+                chat_id=int(SUPER_OWNER_ID),
+                text=weekly_text,
+                parse_mode="Markdown"
+            )
+            logger.info("Monday Weekly report sent successfully to Owner!")
+            await asyncio.sleep(70)
+        except Exception as e:
+            logger.error(f"Weekly report scheduler error: {e}")
+            await asyncio.sleep(60)
+
 async def post_init(application):
-    """Bot start hone par 9 PM scheduler aur Night Mode workers start karta hai."""
+    """Bot start hone par 9 PM scheduler, Monday weekly scheduler aur Night Mode workers start karta hai."""
     asyncio.create_task(daily_report_worker(application.bot))
+    asyncio.create_task(weekly_report_worker(application.bot))
     asyncio.create_task(night_mode_worker(application.bot))
 
 def main():
@@ -1037,6 +1260,8 @@ def main():
     application.add_handler(CommandHandler("left", recent_left_cmd))
     application.add_handler(CommandHandler("nightmode", nightmode_cmd))
     application.add_handler(CommandHandler("namechanges", namechanges_cmd))
+    application.add_handler(CommandHandler("weekly", weekly_cmd))
+    application.add_handler(CommandHandler("cleanup", cleanup_cmd))
     application.add_handler(CommandHandler("export", export_cmd))
 
     # Real-time Chat Member updates listener
