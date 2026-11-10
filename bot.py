@@ -9,10 +9,11 @@ import threading
 from datetime import datetime, timezone, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from dotenv import load_dotenv
-from telegram import Update, ChatPermissions
+from telegram import Update, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatMemberStatus, MessageEntityType
 from telegram.ext import (
     ApplicationBuilder,
+    CallbackQueryHandler,
     ChatMemberHandler,
     CommandHandler,
     ContextTypes,
@@ -130,32 +131,57 @@ async def is_allowed(update: Update) -> bool:
 
     return True
 
+def get_control_panel_keyboard() -> InlineKeyboardMarkup:
+    """Owner ke liye button control panel keyboard create karta hai."""
+    night_btn_text = "☀️ Turn Night Mode OFF" if is_night_mode_active else "🌙 Turn Night Mode ON"
+    keyboard = [
+        [
+            InlineKeyboardButton("📊 Live Stats", callback_data="btn_stats"),
+            InlineKeyboardButton("👥 Member List", callback_data="btn_members"),
+        ],
+        [
+            InlineKeyboardButton("🏆 Top Chatters", callback_data="btn_top"),
+            InlineKeyboardButton("💤 Silent Members", callback_data="btn_inactive"),
+        ],
+        [
+            InlineKeyboardButton("📈 Aaj Ki Report", callback_data="btn_today"),
+            InlineKeyboardButton("📅 Weekly Report", callback_data="btn_weekly"),
+        ],
+        [
+            InlineKeyboardButton("🔄 Name Changes", callback_data="btn_names"),
+            InlineKeyboardButton("🔴 Recent Left", callback_data="btn_left"),
+        ],
+        [
+            InlineKeyboardButton(night_btn_text, callback_data="btn_toggle_night"),
+        ],
+        [
+            InlineKeyboardButton("👻 Ghost Member Cleanup", callback_data="btn_ghost_clean"),
+            InlineKeyboardButton("📥 Download Excel", callback_data="btn_export"),
+        ],
+        [
+            InlineKeyboardButton("🔄 Refresh Dashboard", callback_data="btn_refresh"),
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start command instructions ke sath."""
+    """Start command instructions aur interactive buttons panel ke sath."""
     if not await is_allowed(update):
         return  # Silent ignore
 
-    msg = (
-        "👋 **Namaste! Main Member Tracking & Analytics Bot hoon.**\n\n"
-        "👑 **Owner Commands (Sirf Aapke Liye):**\n"
-        "• `/whois <id/@username>` - Kisi member ki poori kundli (joins, messages, name changes)\n"
-        "• `/top` - Top 10 sabse active chatters leaderboard\n"
-        "• `/inactive [days]` - Silent/inactive members ki list (default: 15 days)\n"
-        "• `/today` - Aaj ki 24-ghante ki summary report\n"
-        "• `/members` ya `/list` - Sabhi members ki list DM me\n"
-        "• `/export` - Excel file (.xlsx) download karein\n"
-        "• `/namechanges` - Haal hi me badle gaye naamo ki history\n"
-        "• `/stats` - Total active/left count\n"
-        "• `/left` - Haal hi me group chhodne wale members\n"
-        "• `/weekly` - Pichle 7 dino ki performance report aur top members\n"
-        "• `/cleanup [days]` - Ghost/Silent members dekhna aur kick karna\n"
-        "• `/nightmode [on/off]` - Night Mode check ya manually on/off karein\n\n"
-        "🌙 *Night Mode: Raat 11:00 PM se subah 6:00 AM tak group auto-mute rahega!*\n"
-        "⏰ *Daily Report: Har raat theek 9:00 PM IST par DM me report aayegi!*\n"
-        "📅 *Weekly Report: Har Monday subah 9:00 AM IST par DM me summary aayegi!*\n"
-        "🤬 *Anti-Abuse: Gaali/Bad words wale message turant delete + 3 warning par Kick!*"
+    panel_text = (
+        "👑 **SUPER OWNER CONTROL DASHBOARD** 👑\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Namaste Malik! Aap apne group ka poora hisaab-kitaab aur security "
+        "seedha neeche diye gaye buttons se one-click me control kar sakte hain:\n\n"
+        f"🌙 **Night Mode Status:** {'`ACTIVE (Group Muted)` 🔒' if is_night_mode_active else '`INACTIVE (Group Open)` 🔓'}\n"
+        "👇 **Neeche kisi bhi button par click karein:**"
     )
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    await update.message.reply_text(
+        panel_text,
+        reply_markup=get_control_panel_keyboard(),
+        parse_mode="Markdown"
+    )
 
 async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Current stats dikhata hai."""
@@ -630,6 +656,272 @@ async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📁 **Total Tracked in DB:** {s['total_members']}\n"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
+
+async def panel_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Button click hone par actions handle karta hai."""
+    query = update.callback_query
+    if not query:
+        return
+
+    # Check permission - Sirf Super Owner (Aap) click kar sakte hain
+    if not is_super_owner(query.from_user.id):
+        await query.answer("⛔ Aapko is control panel ko use karne ki permission nahi hai!", show_alert=True)
+        return
+
+    data = query.data
+    target_group = ALLOWED_GROUP_ID
+
+    # 1. Refresh Button
+    if data == "btn_refresh":
+        await query.answer("🔄 Dashboard refresh ho raha hai...")
+        panel_text = (
+            "👑 **SUPER OWNER CONTROL DASHBOARD** 👑\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "Namaste Malik! Aap apne group ka poora hisaab-kitaab aur security "
+            "seedha neeche diye gaye buttons se one-click me control kar sakte hain:\n\n"
+            f"🌙 **Night Mode Status:** {'`ACTIVE (Group Muted)` 🔒' if is_night_mode_active else '`INACTIVE (Group Open)` 🔓'}\n"
+            f"🕒 **Last Refreshed:** `{datetime.now().strftime('%H:%M:%S')}`\n\n"
+            "👇 **Neeche kisi bhi button par click karein:**"
+        )
+        try:
+            await query.edit_message_text(
+                panel_text,
+                reply_markup=get_control_panel_keyboard(),
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
+        return
+
+    # 2. Live Stats Button
+    elif data == "btn_stats":
+        await query.answer()
+        stats = database.get_stats()
+        text = (
+            "📊 **Group Member Live Statistics:**\n\n"
+            f"🟢 **Active Members:** {stats['active']}\n"
+            f"🔴 **Left Members:** {stats['left']}\n"
+            f"📁 **Total Tracked in DB:** {stats['total']}\n"
+        )
+        await query.message.reply_text(text, parse_mode="Markdown")
+
+    # 3. Member List Button
+    elif data == "btn_members":
+        await query.answer("📋 Member list DM me bheji ja rahi hai...")
+        members = database.get_all_members()
+        if not members:
+            await context.bot.send_message(
+                chat_id=query.from_user.id,
+                text="ℹ️ Abhi tak database me koi member record nahi hua hai."
+            )
+            return
+
+        total = len(members)
+        await context.bot.send_message(
+            chat_id=query.from_user.id,
+            text=f"📋 **Total Members List ({total}):**"
+        )
+        chunk_size = 15
+        for i in range(0, total, chunk_size):
+            chunk = members[i:i + chunk_size]
+            text_lines = []
+            for idx, m in enumerate(chunk, start=i + 1):
+                fname = m.get("first_name") or ""
+                lname = m.get("last_name") or ""
+                full_name = f"{fname} {lname}".strip() or "No Name"
+                uname = f"@{m.get('username')}" if m.get("username") else "None"
+                uid = m.get("_id") or m.get("user_id")
+                status = m.get("status", "active")
+                status_icon = "🟢 Active" if status == "active" else "🔴 Left"
+                joined = m.get("joined_at", "N/A")
+                entry = f"**{idx}. {full_name}** ({uname})\n   🆔 `{uid}` | {status_icon} | 📅 `{joined}`"
+                text_lines.append(entry)
+            await context.bot.send_message(
+                chat_id=query.from_user.id,
+                text="\n\n".join(text_lines),
+                parse_mode="Markdown"
+            )
+            await asyncio.sleep(0.3)
+
+    # 4. Top Chatters Button
+    elif data == "btn_top":
+        await query.answer()
+        top_list = database.get_top_members(limit=10)
+        if not top_list:
+            await query.message.reply_text("ℹ️ Abhi tak group me kisi member ne message nahi kiya hai.")
+            return
+
+        medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+        text = "🏆 **Top Active Members Leaderboard:**\n\n"
+        for idx, m in enumerate(top_list):
+            medal = medals[idx] if idx < len(medals) else f"{idx+1}."
+            full_name = f"{m.get('first_name', '')} {m.get('last_name', '')}".strip() or "No Name"
+            uname = f"(@{m.get('username')})" if m.get("username") else ""
+            cnt = m.get("message_count", 0)
+            text += f"{medal} **{full_name}** {uname}\n    💬 **Messages:** {cnt} | 🆔 `{m.get('_id')}`\n\n"
+        await query.message.reply_text(text, parse_mode="Markdown")
+
+    # 5. Inactive / Silent Members Button
+    elif data == "btn_inactive":
+        await query.answer()
+        inactives = database.get_inactive_members(days=15, limit=20)
+        if not inactives:
+            await query.message.reply_text("👏 Pichle 15 din me sabhi active members ne koi na koi message kiya hai!")
+            return
+
+        text = "💤 **Inactive / Silent Members (Pichle 15 Din Se):**\n\n"
+        for idx, m in enumerate(inactives, 1):
+            full_name = f"{m.get('first_name', '')} {m.get('last_name', '')}".strip() or "No Name"
+            uname = f"(@{m.get('username')})" if m.get("username") else ""
+            last_seen = m.get("last_message_at") or "Kabhi nahi"
+            text += f"{idx}. **{full_name}** {uname}\n    🆔 `{m.get('_id')}` | 🕒 Last: `{last_seen}`\n\n"
+        await query.message.reply_text(text, parse_mode="Markdown")
+
+    # 6. Aaj Ki Report Button
+    elif data == "btn_today":
+        await query.answer()
+        s = database.get_daily_summary_stats()
+        text = (
+            f"📈 **Aaj ki Report ({s['date']}):**\n\n"
+            f"🟢 **Naye Joins:** {s['joins']}\n"
+            f"🔴 **Left Members:** {s['left']}\n"
+            f"🔄 **Name Changes:** {s['name_changes']}\n"
+            f"👥 **Total Active Members:** {s['active_total']}\n"
+            f"📁 **Total Tracked in DB:** {s['total_members']}\n"
+        )
+        await query.message.reply_text(text, parse_mode="Markdown")
+
+    # 7. Weekly Report Button
+    elif data == "btn_weekly":
+        await query.answer()
+        w = database.get_weekly_summary_stats()
+        top_text = ""
+        if w.get("top_5"):
+            top_text = "\n\n🏆 **Top 5 Active Chatters of the Week:**\n"
+            for i, m in enumerate(w["top_5"], 1):
+                top_text += f"{i}. {m.get('first_name', 'User')} — `{m.get('message_count', 0)} msgs`\n"
+
+        text = (
+            f"📅 **Weekly Report ({w['from_date']} se {w['to_date']}):**\n\n"
+            f"🟢 **Hafte ke Naye Joins:** {w['joins']}\n"
+            f"🔴 **Hafte ke Left Members:** {w['left']}\n"
+            f"🔄 **Name Changes:** {w['name_changes']}\n"
+            f"👥 **Total Active Members:** {w['active_total']}\n"
+            f"📁 **Total Tracked in DB:** {w['total_members']}"
+            f"{top_text}\n"
+        )
+        await query.message.reply_text(text, parse_mode="Markdown")
+
+    # 8. Name Changes Button
+    elif data == "btn_names":
+        await query.answer()
+        changes = database.get_recent_name_changes(limit=10)
+        if not changes:
+            await query.message.reply_text("ℹ️ Abhi tak kisi ne bhi apna naam nahi badla hai.")
+            return
+
+        text = "🔄 **Recent Name Changes:**\n\n"
+        for idx, c in enumerate(changes, 1):
+            old_name = f"{c.get('old_first_name', '')} {c.get('old_last_name', '')}".strip() or "No Name"
+            new_name = f"{c.get('new_first_name', '')} {c.get('new_last_name', '')}".strip() or "No Name"
+            old_uname = f"@{c.get('old_username')}" if c.get("old_username") else "None"
+            new_uname = f"@{c.get('new_username')}" if c.get("new_username") else "None"
+            changed_at = c.get("changed_at", "N/A")
+            uid = c.get("user_id")
+            text += f"{idx}. 🆔 `{uid}`\n   📛 {old_name} ({old_uname}) ➔ {new_name} ({new_uname})\n   🕒 `{changed_at}`\n\n"
+        await query.message.reply_text(text, parse_mode="Markdown")
+
+    # 9. Recent Left Button
+    elif data == "btn_left":
+        await query.answer()
+        recent = database.get_recent_left(limit=10)
+        if not recent:
+            await query.message.reply_text("ℹ️ Abhi tak kisi ne group nahi chhoda hai.")
+            return
+
+        text = "🔴 **Recently Group Chhodne Wale Members:**\n\n"
+        for idx, row in enumerate(recent, 1):
+            uid, fname, lname, uname, left_at = row
+            name = f"{fname or ''} {lname or ''}".strip() or "Unnamed"
+            username_str = f"(@{uname})" if uname else "(No Username)"
+            text += f"{idx}. **{name}** {username_str}\n   🕒 Left: `{left_at}` | 🆔 `{uid}`\n\n"
+        await query.message.reply_text(text, parse_mode="Markdown")
+
+    # 10. Night Mode Toggle Button (One-click ON/OFF)
+    elif data == "btn_toggle_night":
+        if not target_group:
+            await query.answer("❌ ALLOWED_GROUP_ID set nahi hai!", show_alert=True)
+            return
+
+        if is_night_mode_active:
+            # Turn OFF
+            await disable_night_mode(context.bot, target_group, announce=True)
+            await query.answer("☀️ Night Mode OFF ho gaya! Group khul gaya.", show_alert=True)
+        else:
+            # Turn ON
+            await enable_night_mode(context.bot, target_group, announce=True)
+            await query.answer("🌙 Night Mode ON ho gaya! Group lock ho gaya.", show_alert=True)
+
+        # Update button text on dashboard
+        try:
+            panel_text = (
+                "👑 **SUPER OWNER CONTROL DASHBOARD** 👑\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                "Namaste Malik! Aap apne group ka poora hisaab-kitaab aur security "
+                "seedha neeche diye gaye buttons se one-click me control kar sakte hain:\n\n"
+                f"🌙 **Night Mode Status:** {'`ACTIVE (Group Muted)` 🔒' if is_night_mode_active else '`INACTIVE (Group Open)` 🔓'}\n"
+                f"🕒 **Last Updated:** `{datetime.now().strftime('%H:%M:%S')}`\n\n"
+                "👇 **Neeche kisi bhi button par click karein:**"
+            )
+            await query.edit_message_text(
+                panel_text,
+                reply_markup=get_control_panel_keyboard(),
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
+
+    # 11. Ghost Cleaner Button
+    elif data == "btn_ghost_clean":
+        await query.answer()
+        ghosts = database.get_ghost_members(days=30, limit=20)
+        if not ghosts:
+            await query.message.reply_text("🎉 Pichle 30 din me koi bhi ghost member nahi mila! Sab active hain.")
+            return
+
+        pending_cleanup[str(query.from_user.id)] = ghosts
+        text = f"👻 **Ghost / Silent Members (Pichle 30 Din Se):**\n"
+        text += f"Total {len(ghosts)} members mile jo itne din se chup hain:\n\n"
+        for idx, m in enumerate(ghosts[:10], 1):
+            name = f"{m.get('first_name', '')} {m.get('last_name', '')}".strip() or "No Name"
+            uname = f"(@{m.get('username')})" if m.get("username") else ""
+            text += f"{idx}. **{name}** {uname} — ID: `{m.get('user_id') or m.get('_id')}`\n"
+        if len(ghosts) > 10:
+            text += f"\n...aur {len(ghosts) - 10} aur members.\n"
+        text += "\n⚠️ Unhe kick karne ke liye type karein: `/cleanup confirm`"
+        await query.message.reply_text(text, parse_mode="Markdown")
+
+    # 12. Export Excel Button
+    elif data == "btn_export":
+        await query.answer("📥 Excel file ban rahi hai, aapke DM me aayegi...")
+        target_chat_id = query.from_user.id
+        status_msg = await context.bot.send_message(
+            chat_id=target_chat_id,
+            text="⏳ Excel report taiyaar ho rahi hai, kripya intezar karein..."
+        )
+        try:
+            filepath = database.export_to_excel("telegram_members_live_report.xlsx")
+            with open(filepath, "rb") as f:
+                await context.bot.send_document(
+                    chat_id=target_chat_id,
+                    document=f,
+                    filename="telegram_members_live_report.xlsx",
+                    caption="📊 **Members Full Report (Excel File)**"
+                )
+            await status_msg.delete()
+        except Exception as e:
+            logger.error(f"Excel export error: {e}")
+            await status_msg.edit_text(f"❌ File export error: {e}")
 
 async def handle_name_change(chat, user):
     """Common helper: Message, Reaction ya Event aane par name change detect karke alert bhejta hai."""
@@ -1263,6 +1555,9 @@ def main():
     application.add_handler(CommandHandler("weekly", weekly_cmd))
     application.add_handler(CommandHandler("cleanup", cleanup_cmd))
     application.add_handler(CommandHandler("export", export_cmd))
+
+    # Interactive Dashboard Buttons callback handler
+    application.add_handler(CallbackQueryHandler(panel_callback_handler))
 
     # Real-time Chat Member updates listener
     application.add_handler(
