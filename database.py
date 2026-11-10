@@ -1,6 +1,7 @@
 import os
+import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from dotenv import load_dotenv
@@ -65,9 +66,18 @@ def init_db():
                 status TEXT DEFAULT 'active',
                 joined_at TEXT,
                 left_at TEXT,
-                updated_at TEXT
+                updated_at TEXT,
+                message_count INTEGER DEFAULT 0,
+                last_message_at TEXT
             )
         """)
+        # Existing tables ke liye columns check karein
+        cursor.execute("PRAGMA table_info(members)")
+        cols = [c[1] for c in cursor.fetchall()]
+        if "message_count" not in cols:
+            cursor.execute("ALTER TABLE members ADD COLUMN message_count INTEGER DEFAULT 0")
+        if "last_message_at" not in cols:
+            cursor.execute("ALTER TABLE members ADD COLUMN last_message_at TEXT")
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS name_changes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -529,3 +539,245 @@ def export_to_excel(filepath="telegram_members_report.xlsx"):
 
     wb.save(filepath)
     return filepath
+
+def record_message(user_id):
+    """Member ke message count aur last seen ko increment karta hai."""
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if mongo_col is not None:
+        try:
+            mongo_col.update_one(
+                {"_id": user_id},
+                {
+                    "$inc": {"message_count": 1},
+                    "$set": {"last_message_at": now_str}
+                },
+                upsert=False
+            )
+            return
+        except Exception as e:
+            print(f"MongoDB record message error: {e}")
+
+    with sqlite3.connect(SQLITE_DB) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE members 
+            SET message_count = COALESCE(message_count, 0) + 1,
+                last_message_at = ?
+            WHERE user_id = ?
+        """, (now_str, user_id))
+        conn.commit()
+
+def get_user_history(query: str):
+    """
+    User ki poori history (join, leave, message count, name changes) nikalta hai.
+    query: User ID (int/str) ya Username (@username).
+    """
+    clean_q = str(query).strip().lstrip("@")
+    target_id = None
+    if clean_q.isdigit():
+        target_id = int(clean_q)
+
+    user_doc = None
+    if mongo_col is not None:
+        try:
+            if target_id:
+                user_doc = mongo_col.find_one({"_id": target_id})
+            if not user_doc:
+                user_doc = mongo_col.find_one({
+                    "username": {"$regex": f"^{re.escape(clean_q)}$", "$options": "i"}
+                })
+
+            if not user_doc:
+                return None
+
+            uid = user_doc["_id"]
+            changes = []
+            if mongo_name_col is not None:
+                changes = list(mongo_name_col.find({"user_id": uid}).sort("changed_at", -1))
+
+            return {
+                "user_id": uid,
+                "first_name": user_doc.get("first_name", ""),
+                "last_name": user_doc.get("last_name", ""),
+                "username": user_doc.get("username", ""),
+                "status": user_doc.get("status", "active"),
+                "joined_at": user_doc.get("joined_at", "N/A"),
+                "left_at": user_doc.get("left_at"),
+                "message_count": user_doc.get("message_count", 0),
+                "last_message_at": user_doc.get("last_message_at", "N/A"),
+                "name_changes": changes
+            }
+        except Exception as e:
+            print(f"MongoDB whois error: {e}")
+            return None
+
+    # SQLite fallback
+    with sqlite3.connect(SQLITE_DB) as conn:
+        cursor = conn.cursor()
+        if target_id:
+            cursor.execute("""
+                SELECT user_id, first_name, last_name, username, status, joined_at, left_at, message_count, last_message_at 
+                FROM members WHERE user_id = ?
+            """, (target_id,))
+        else:
+            cursor.execute("""
+                SELECT user_id, first_name, last_name, username, status, joined_at, left_at, message_count, last_message_at 
+                FROM members WHERE LOWER(username) = LOWER(?)
+            """, (clean_q,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+
+        uid = row[0]
+        cursor.execute("""
+            SELECT old_first_name, old_last_name, old_username, new_first_name, new_last_name, new_username, changed_at 
+            FROM name_changes WHERE user_id = ? ORDER BY changed_at DESC
+        """, (uid,))
+        nc_rows = cursor.fetchall()
+        changes = [
+            {
+                "old_first_name": c[0], "old_last_name": c[1], "old_username": c[2],
+                "new_first_name": c[3], "new_last_name": c[4], "new_username": c[5],
+                "changed_at": c[6]
+            } for c in nc_rows
+        ]
+
+        return {
+            "user_id": uid,
+            "first_name": row[1] or "",
+            "last_name": row[2] or "",
+            "username": row[3] or "",
+            "status": row[4] or "active",
+            "joined_at": row[5] or "N/A",
+            "left_at": row[6],
+            "message_count": row[7] or 0,
+            "last_message_at": row[8] or "N/A",
+            "name_changes": changes
+        }
+
+def get_top_members(limit=10):
+    """Sabse zyada messages bhejne wale top active members."""
+    if mongo_col is not None:
+        try:
+            docs = mongo_col.find(
+                {"status": "active", "message_count": {"$gt": 0}}
+            ).sort("message_count", -1).limit(limit)
+            return list(docs)
+        except Exception as e:
+            print(f"MongoDB top members error: {e}")
+
+    with sqlite3.connect(SQLITE_DB) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT user_id, first_name, last_name, username, message_count
+            FROM members
+            WHERE status = 'active' AND message_count > 0
+            ORDER BY message_count DESC
+            LIMIT ?
+        """, (limit,))
+        rows = cursor.fetchall()
+        return [
+            {
+                "_id": r[0],
+                "first_name": r[1] or "",
+                "last_name": r[2] or "",
+                "username": r[3] or "",
+                "message_count": r[4] or 0
+            } for r in rows
+        ]
+
+def get_inactive_members(days=15, limit=20):
+    """Pichle `days` din se silent/inactive active members."""
+    cutoff = datetime.now() - timedelta(days=days)
+    cutoff_str = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+
+    if mongo_col is not None:
+        try:
+            query = {
+                "status": "active",
+                "$or": [
+                    {"last_message_at": None},
+                    {"last_message_at": {"$lt": cutoff_str}},
+                    {"message_count": {"$in": [0, None]}}
+                ]
+            }
+            return list(mongo_col.find(query).limit(limit))
+        except Exception as e:
+            print(f"MongoDB inactive error: {e}")
+
+    with sqlite3.connect(SQLITE_DB) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT user_id, first_name, last_name, username, joined_at, message_count, last_message_at
+            FROM members
+            WHERE status = 'active' AND (last_message_at IS NULL OR last_message_at < ? OR message_count = 0 OR message_count IS NULL)
+            LIMIT ?
+        """, (cutoff_str, limit))
+        rows = cursor.fetchall()
+        return [
+            {
+                "_id": r[0],
+                "first_name": r[1] or "",
+                "last_name": r[2] or "",
+                "username": r[3] or "",
+                "joined_at": r[4] or "",
+                "message_count": r[5] or 0,
+                "last_message_at": r[6]
+            } for r in rows
+        ]
+
+def get_daily_summary_stats():
+    """Aaj ki 24 ghante ki summary (joins, lefts, name changes, totals)."""
+    today_str = datetime.now().strftime("%Y-%m-%d")
+
+    if mongo_col is not None:
+        try:
+            active_total = mongo_col.count_documents({"status": "active"})
+            total_members = mongo_col.count_documents({})
+            joins_today = mongo_col.count_documents({
+                "joined_at": {"$regex": f"^{today_str}"}
+            })
+            left_today = mongo_col.count_documents({
+                "left_at": {"$regex": f"^{today_str}"}
+            })
+            name_changes_today = 0
+            if mongo_name_col is not None:
+                name_changes_today = mongo_name_col.count_documents({
+                    "changed_at": {"$regex": f"^{today_str}"}
+                })
+            return {
+                "joins": joins_today,
+                "left": left_today,
+                "name_changes": name_changes_today,
+                "active_total": active_total,
+                "total_members": total_members,
+                "date": today_str
+            }
+        except Exception as e:
+            print(f"MongoDB daily summary error: {e}")
+
+    with sqlite3.connect(SQLITE_DB) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM members WHERE status = 'active'")
+        active_total = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM members")
+        total_members = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM members WHERE joined_at LIKE ?", (f"{today_str}%",))
+        joins_today = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM members WHERE left_at LIKE ?", (f"{today_str}%",))
+        left_today = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM name_changes WHERE changed_at LIKE ?", (f"{today_str}%",))
+        name_changes_today = cursor.fetchone()[0]
+
+        return {
+            "joins": joins_today,
+            "left": left_today,
+            "name_changes": name_changes_today,
+            "active_total": active_total,
+            "total_members": total_members,
+            "date": today_str
+        }

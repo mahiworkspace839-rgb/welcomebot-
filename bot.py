@@ -6,6 +6,7 @@ import re
 import logging
 import asyncio
 import threading
+from datetime import datetime, timezone, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from dotenv import load_dotenv
 from telegram import Update
@@ -100,14 +101,18 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return  # Silent ignore
 
     msg = (
-        "👋 **Namaste! Main Member Tracking Bot hoon.**\n\n"
-        "Main group ke members ka aana-jaana (Join/Left) real-time me record karta hoon.\n\n"
-        "📌 **Aapke Commands:**\n"
-        "• `/members` ya `/list` - Sabhi members ki poori details (Name, User ID, Username, Dates) DM me paayein\n"
-        "• `/export` - Excel file (.xlsx) seedha DM me paayein\n"
-        "• `/stats` - Active aur left members ka live count\n"
+        "👋 **Namaste! Main Member Tracking & Analytics Bot hoon.**\n\n"
+        "👑 **Owner Commands (Sirf Aapke Liye):**\n"
+        "• `/whois <id/@username>` - Kisi member ki poori kundli (joins, messages, name changes)\n"
+        "• `/top` - Top 10 sabse active chatters leaderboard\n"
+        "• `/inactive [days]` - Silent/inactive members ki list (default: 15 days)\n"
+        "• `/today` - Aaj ki 24-ghante ki summary report\n"
+        "• `/members` ya `/list` - Sabhi members ki list DM me\n"
+        "• `/export` - Excel file (.xlsx) download karein\n"
+        "• `/namechanges` - Haal hi me badle gaye naamo ki history\n"
+        "• `/stats` - Total active/left count\n"
         "• `/left` - Haal hi me group chhodne wale members\n\n"
-        "🔒 *Security: Yeh bot sirf aapke group aur aapke messages par active hai.*"
+        "⏰ *Daily Automated Report: Har raat theek 9:00 PM IST par aapke DM me summary aayegi!*"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -143,6 +148,116 @@ async def recent_left_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         username_str = f"(@{uname})" if uname else "(No Username)"
         text += f"{idx}. **{name}** {username_str}\n   🕒 Left At: `{left_at}`\n   🆔 ID: `{uid}`\n\n"
 
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def whois_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User ki poori kundli: joins, message count, name changes, status."""
+    if not await is_allowed(update):
+        return
+
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "ℹ️ Kripya User ID ya Username likhein:\n"
+            "Example: `/whois 123456789` ya `/whois @username`",
+            parse_mode="Markdown"
+        )
+        return
+
+    query = args[0]
+    data = database.get_user_history(query)
+    if not data:
+        await update.message.reply_text(f"❌ User `{query}` database me nahi mila.", parse_mode="Markdown")
+        return
+
+    status_str = "🟢 Active (Group me hai)" if data["status"] == "active" else f"🔴 Left (Left at: `{data['left_at']}`)"
+    uname_str = f"@{data['username']}" if data["username"] else "(No Username)"
+    full_name = f"{data['first_name']} {data['last_name']}".strip() or "No Name"
+
+    text = (
+        f"🔍 **User Kundli / Full History:**\n\n"
+        f"👤 **Name:** {full_name}\n"
+        f"🆔 **User ID:** `{data['user_id']}`\n"
+        f"🔗 **Username:** {uname_str}\n"
+        f"📌 **Status:** {status_str}\n"
+        f"📅 **Joined Date:** `{data['joined_at']}`\n"
+        f"💬 **Total Messages Sent:** {data['message_count']}\n"
+        f"🕒 **Last Active:** `{data['last_message_at']}`\n"
+    )
+
+    nc = data["name_changes"]
+    if nc:
+        text += f"\n🔄 **Name Change History ({len(nc)}):**\n"
+        for idx, c in enumerate(nc[:5], 1):
+            o_name = f"{c.get('old_first_name', '')} {c.get('old_last_name', '')}".strip() or "No Name"
+            n_name = f"{c.get('new_first_name', '')} {c.get('new_last_name', '')}".strip() or "No Name"
+            o_u = f"@{c.get('old_username')}" if c.get("old_username") else "None"
+            n_u = f"@{c.get('new_username')}" if c.get("new_username") else "None"
+            text += f"{idx}. `{c.get('changed_at')}`: {o_name} ({o_u}) ➔ {n_name} ({n_u})\n"
+    else:
+        text += "\n🔄 **Name Change History:** Koi badlaav nahi hua."
+
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def top_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Top 10 active chatters leaderboard."""
+    if not await is_allowed(update):
+        return
+
+    top_list = database.get_top_members(limit=10)
+    if not top_list:
+        await update.message.reply_text("ℹ️ Abhi tak group me kisi member ne message nahi kiya hai.")
+        return
+
+    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    text = "🏆 **Top Active Members Leaderboard:**\n\n"
+    for idx, m in enumerate(top_list):
+        medal = medals[idx] if idx < len(medals) else f"{idx+1}."
+        full_name = f"{m.get('first_name', '')} {m.get('last_name', '')}".strip() or "No Name"
+        uname = f"(@{m.get('username')})" if m.get("username") else ""
+        cnt = m.get("message_count", 0)
+        text += f"{medal} **{full_name}** {uname}\n    💬 **Messages:** {cnt} | 🆔 `{m.get('_id')}`\n\n"
+
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def inactive_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pichle 15 ya X din se silent members ki list."""
+    if not await is_allowed(update):
+        return
+
+    days = 15
+    if context.args and context.args[0].isdigit():
+        days = int(context.args[0])
+
+    inactives = database.get_inactive_members(days=days, limit=20)
+    if not inactives:
+        await update.message.reply_text(f"👏 Pichle {days} din me sabhi active members ne koi na koi message kiya hai!")
+        return
+
+    text = f"💤 **Inactive / Silent Members (Pichle {days} Din Se):**\n"
+    text += "Yeh members group me hain lekin koi baat nahi kar rahe:\n\n"
+    for idx, m in enumerate(inactives, 1):
+        full_name = f"{m.get('first_name', '')} {m.get('last_name', '')}".strip() or "No Name"
+        uname = f"(@{m.get('username')})" if m.get("username") else ""
+        last_seen = m.get("last_message_at") or "Kabhi nahi (0 messages)"
+        text += f"{idx}. **{full_name}** {uname}\n    🆔 `{m.get('_id')}` | 🕒 Last: `{last_seen}`\n\n"
+
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Aaj ki poori live report summary."""
+    if not await is_allowed(update):
+        return
+
+    s = database.get_daily_summary_stats()
+    text = (
+        f"📈 **Aaj ki Report ({s['date']}):**\n\n"
+        f"🟢 **Naye Joins:** {s['joins']}\n"
+        f"🔴 **Left Members:** {s['left']}\n"
+        f"🔄 **Name Changes:** {s['name_changes']}\n"
+        f"👥 **Total Active Members:** {s['active_total']}\n"
+        f"📁 **Total Tracked in DB:** {s['total_members']}\n"
+    )
     await update.message.reply_text(text, parse_mode="Markdown")
 
 async def members_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -260,6 +375,116 @@ async def namechanges_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         entry += f"   🕒 **Changed At:** `{changed_at}`\n\n"
         text += entry
 
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def whois_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User ki poori kundli: joins, message count, name changes, status."""
+    if not await is_allowed(update):
+        return
+
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "ℹ️ Kripya User ID ya Username likhein:\n"
+            "Example: `/whois 123456789` ya `/whois @username`",
+            parse_mode="Markdown"
+        )
+        return
+
+    query = args[0]
+    data = database.get_user_history(query)
+    if not data:
+        await update.message.reply_text(f"❌ User `{query}` database me nahi mila.", parse_mode="Markdown")
+        return
+
+    status_str = "🟢 Active (Group me hai)" if data["status"] == "active" else f"🔴 Left (Left at: `{data['left_at']}`)"
+    uname_str = f"@{data['username']}" if data["username"] else "(No Username)"
+    full_name = f"{data['first_name']} {data['last_name']}".strip() or "No Name"
+
+    text = (
+        f"🔍 **User Kundli / Full History:**\n\n"
+        f"👤 **Name:** {full_name}\n"
+        f"🆔 **User ID:** `{data['user_id']}`\n"
+        f"🔗 **Username:** {uname_str}\n"
+        f"📌 **Status:** {status_str}\n"
+        f"📅 **Joined Date:** `{data['joined_at']}`\n"
+        f"💬 **Total Messages Sent:** {data['message_count']}\n"
+        f"🕒 **Last Active:** `{data['last_message_at']}`\n"
+    )
+
+    nc = data["name_changes"]
+    if nc:
+        text += f"\n🔄 **Name Change History ({len(nc)}):**\n"
+        for idx, c in enumerate(nc[:5], 1):
+            o_name = f"{c.get('old_first_name', '')} {c.get('old_last_name', '')}".strip() or "No Name"
+            n_name = f"{c.get('new_first_name', '')} {c.get('new_last_name', '')}".strip() or "No Name"
+            o_u = f"@{c.get('old_username')}" if c.get("old_username") else "None"
+            n_u = f"@{c.get('new_username')}" if c.get("new_username") else "None"
+            text += f"{idx}. `{c.get('changed_at')}`: {o_name} ({o_u}) ➔ {n_name} ({n_u})\n"
+    else:
+        text += "\n🔄 **Name Change History:** Koi badlaav nahi hua."
+
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def top_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Top 10 active chatters leaderboard."""
+    if not await is_allowed(update):
+        return
+
+    top_list = database.get_top_members(limit=10)
+    if not top_list:
+        await update.message.reply_text("ℹ️ Abhi tak group me kisi member ne message nahi kiya hai.")
+        return
+
+    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    text = "🏆 **Top Active Members Leaderboard:**\n\n"
+    for idx, m in enumerate(top_list):
+        medal = medals[idx] if idx < len(medals) else f"{idx+1}."
+        full_name = f"{m.get('first_name', '')} {m.get('last_name', '')}".strip() or "No Name"
+        uname = f"(@{m.get('username')})" if m.get("username") else ""
+        cnt = m.get("message_count", 0)
+        text += f"{medal} **{full_name}** {uname}\n    💬 **Messages:** {cnt} | 🆔 `{m.get('_id')}`\n\n"
+
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def inactive_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pichle 15 ya X din se silent members ki list."""
+    if not await is_allowed(update):
+        return
+
+    days = 15
+    if context.args and context.args[0].isdigit():
+        days = int(context.args[0])
+
+    inactives = database.get_inactive_members(days=days, limit=20)
+    if not inactives:
+        await update.message.reply_text(f"👏 Pichle {days} din me sabhi active members ne koi na koi message kiya hai!")
+        return
+
+    text = f"💤 **Inactive / Silent Members (Pichle {days} Din Se):**\n"
+    text += "Yeh members group me hain lekin koi baat nahi kar rahe:\n\n"
+    for idx, m in enumerate(inactives, 1):
+        full_name = f"{m.get('first_name', '')} {m.get('last_name', '')}".strip() or "No Name"
+        uname = f"(@{m.get('username')})" if m.get("username") else ""
+        last_seen = m.get("last_message_at") or "Kabhi nahi (0 messages)"
+        text += f"{idx}. **{full_name}** {uname}\n    🆔 `{m.get('_id')}` | 🕒 Last: `{last_seen}`\n\n"
+
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Aaj ki poori live report summary."""
+    if not await is_allowed(update):
+        return
+
+    s = database.get_daily_summary_stats()
+    text = (
+        f"📈 **Aaj ki Report ({s['date']}):**\n\n"
+        f"🟢 **Naye Joins:** {s['joins']}\n"
+        f"🔴 **Left Members:** {s['left']}\n"
+        f"🔄 **Name Changes:** {s['name_changes']}\n"
+        f"👥 **Total Active Members:** {s['active_total']}\n"
+        f"📁 **Total Tracked in DB:** {s['total_members']}\n"
+    )
     await update.message.reply_text(text, parse_mode="Markdown")
 
 async def handle_name_change(chat, user):
@@ -396,6 +621,9 @@ async def check_name_on_message(update: Update, context: ContextTypes.DEFAULT_TY
     # Bots ko chhod dein
     if user.is_bot:
         return
+
+    # Message count & last seen record karein (Top chatters & Inactivity tracking)
+    database.record_message(user.id)
 
     # Sirf Main Owner (Aap) ko link bhejna allow hai. Dusre admins aur members sabka link delete hoga!
     if is_allowed_to_post_links(user.id):
@@ -541,6 +769,52 @@ def run_health_server():
     logger.info(f"Render Health Check Web Server running on port {port}")
     server.serve_forever()
 
+async def daily_report_worker(bot):
+    """Har raat theek 9:00 PM IST par seedha 6416451659 ke DM me automatic report bhejta hai."""
+    logger.info("Daily 9:00 PM IST Scheduler loop started.")
+    while True:
+        try:
+            # Current time in IST (UTC + 5:30)
+            utc_now = datetime.now(timezone.utc)
+            ist_now = utc_now + timedelta(hours=5, minutes=30)
+
+            # Target: Aaj raat 21:00:00 (9:00 PM) IST
+            target = ist_now.replace(hour=21, minute=0, second=0, microsecond=0)
+            if ist_now >= target:
+                target += timedelta(days=1)
+
+            wait_secs = (target - ist_now).total_seconds()
+            logger.info(f"Next 9 PM IST daily report scheduled in {int(wait_secs)} seconds ({target.strftime('%Y-%m-%d %H:%M:%S')} IST)")
+            await asyncio.sleep(wait_secs)
+
+            # Send report to SUPER_OWNER_ID (6416451659)
+            s = database.get_daily_summary_stats()
+            report_text = (
+                f"⏰ **9:00 PM Daily Automated Summary Report:**\n\n"
+                f"📅 **Date:** {s['date']}\n"
+                f"🟢 **Naye Joins:** {s['joins']}\n"
+                f"🔴 **Left Members:** {s['left']}\n"
+                f"🔄 **Name Changes:** {s['name_changes']}\n"
+                f"👥 **Total Active Members:** {s['active_total']}\n"
+                f"📁 **Total Tracked in DB:** {s['total_members']}\n\n"
+                "Full Excel report download karne ke liye `/export` bhejein."
+            )
+            await bot.send_message(
+                chat_id=int(SUPER_OWNER_ID),
+                text=report_text,
+                parse_mode="Markdown"
+            )
+            logger.info("9:00 PM Daily report sent successfully to Owner!")
+            # 70 seconds sleep taaki ek hi minute me do baar trigger na ho
+            await asyncio.sleep(70)
+        except Exception as e:
+            logger.error(f"Daily report scheduler error: {e}")
+            await asyncio.sleep(60)
+
+async def post_init(application):
+    """Bot start hone par 9 PM scheduler task start karta hai."""
+    asyncio.create_task(daily_report_worker(application.bot))
+
 def main():
     database.init_db()
 
@@ -554,11 +828,16 @@ def main():
     application = (
         ApplicationBuilder()
         .token(token)
+        .post_init(post_init)
         .build()
     )
 
     # Handlers register karein
     application.add_handler(CommandHandler("start", start_cmd))
+    application.add_handler(CommandHandler("whois", whois_cmd))
+    application.add_handler(CommandHandler("top", top_cmd))
+    application.add_handler(CommandHandler("inactive", inactive_cmd))
+    application.add_handler(CommandHandler("today", today_cmd))
     application.add_handler(CommandHandler("members", members_cmd))
     application.add_handler(CommandHandler("list", members_cmd))
     application.add_handler(CommandHandler("stats", stats_cmd))
