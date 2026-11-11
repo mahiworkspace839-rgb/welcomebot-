@@ -1291,6 +1291,11 @@ async def track_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
             username=user.username
         )
 
+    # Case 3: Member abhi bhi member hai (Status change ya background update) -> Real-time Name Change Check
+    elif is_member:
+        # SangMata ki tarah bina message bheje bhi background me turant naam check karein!
+        await handle_name_change(chat, user)
+
 async def track_bot_added(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Bot ko kisi unauthorized group me add kiya jaye to turant leave kar de."""
     chat = update.effective_chat
