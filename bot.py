@@ -439,6 +439,98 @@ async def cleanup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
+async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /ban command (Super Owner only):
+    Kisi member ko reply karke ya tag karke /ban @username ya /ban <user_id>
+    Bot usko group se permanently ban kar dega aur 'GET OUT 🪟🧹' bolega,
+    jo theek 20 seconds me auto-delete ho jayega!
+    """
+    if not await is_allowed(update):
+        return
+
+    msg = update.effective_message
+    chat = update.effective_chat
+    target_group = ALLOWED_GROUP_ID or (chat.id if chat.type in ["group", "supergroup"] else None)
+
+    if not target_group:
+        await msg.reply_text("❌ ALLOWED_GROUP_ID set nahi hai.")
+        return
+
+    target_user_id = None
+    target_name = "User"
+
+    # Case 1: Agar kisi message ko Reply karke /ban likha gaya ho
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        target_user = msg.reply_to_message.from_user
+        target_user_id = target_user.id
+        target_name = target_user.first_name
+
+    # Case 2: Agar /ban @username ya /ban 12345678 likha ho
+    elif context.args:
+        arg = context.args[0].strip()
+        if arg.isdigit():
+            target_user_id = int(arg)
+            target_name = f"ID {arg}"
+        elif arg.startswith("@"):
+            # Username se ID database se khojo
+            uname_clean = arg.lstrip("@")
+            hist = database.get_user_history(uname_clean)
+            if hist and hist.get("user_id"):
+                target_user_id = int(hist["user_id"])
+                target_name = hist.get("first_name") or arg
+            else:
+                await msg.reply_text(f"❌ User `{arg}` database me nahi mila. Kripya uske message par reply karke `/ban` karein ya User ID use karein.", parse_mode="Markdown")
+                return
+        else:
+            await msg.reply_text("ℹ️ Kripya kisi ke message par reply karein ya format use karein:\n`/ban @username` ya `/ban <user_id>`", parse_mode="Markdown")
+            return
+    else:
+        await msg.reply_text("ℹ️ Kripya kisi ke message par reply karein ya type karein:\n`/ban @username` ya `/ban <user_id>`", parse_mode="Markdown")
+        return
+
+    # Whitelist protection: Super Owner aur Partner ko ban nahi kiya ja sakta
+    if is_super_owner(target_user_id) or str(target_user_id) in LINK_ALLOWED_IDS:
+        await msg.reply_text("⛔ Yeh Owner / Partner hain! Inhe ban nahi kiya ja sakta.")
+        return
+
+    try:
+        # Group se BAN karo
+        await context.bot.ban_chat_member(chat_id=int(target_group), user_id=target_user_id)
+        logger.info(f"User {target_user_id} ({target_name}) banned from chat {target_group} by Owner.")
+
+        # Database me status left/banned mark karo
+        database.member_left(user_id=target_user_id)
+
+        # GET OUT 🪟🧹 notice bhejo
+        user_mention = f"[{target_name}](tg://user?id={target_user_id})"
+        ban_msg_text = f"🚪 {user_mention}\n\n**GET OUT 🪟🧹**"
+        
+        # Message group me bhejo
+        sent_ban_msg = await context.bot.send_message(
+            chat_id=int(target_group),
+            text=ban_msg_text,
+            parse_mode="Markdown"
+        )
+
+        # Theek 20 second me auto-delete (User Demand)
+        async def _auto_del_ban():
+            await asyncio.sleep(20)
+            try:
+                await sent_ban_msg.delete()
+                # Admin ka command message bhi delete kar do agar group me tha
+                if chat.type in ["group", "supergroup"]:
+                    await msg.delete()
+            except Exception:
+                pass
+
+        asyncio.create_task(_auto_del_ban())
+
+    except Exception as e:
+        logger.error(f"Error banning user {target_user_id}: {e}")
+        await msg.reply_text(f"❌ Ban karne me error aaya: {e}")
+
+
 async def members_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Sabhi members ka pura detail (Name, ID, Status, Dates) seedha DM pe bhejta hai."""
     if not await is_allowed(update):
@@ -1779,6 +1871,7 @@ def main():
     application.add_handler(CommandHandler("left", recent_left_cmd))
     application.add_handler(CommandHandler("nightmode", nightmode_cmd))
     application.add_handler(CommandHandler("quiz", quizmode_cmd))
+    application.add_handler(CommandHandler("ban", ban_cmd))
     application.add_handler(CommandHandler("namechanges", namechanges_cmd))
     application.add_handler(CommandHandler("weekly", weekly_cmd))
     application.add_handler(CommandHandler("cleanup", cleanup_cmd))
