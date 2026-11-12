@@ -530,7 +530,6 @@ async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error banning user {target_user_id}: {e}")
         await msg.reply_text(f"❌ Ban karne me error aaya: {e}")
 
-
 async def members_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Sabhi members ka pura detail (Name, ID, Status, Dates) seedha DM pe bhejta hai."""
     if not await is_allowed(update):
@@ -639,7 +638,8 @@ async def namechanges_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_name = f"{c.get('new_first_name', '')} {c.get('new_last_name', '')}".strip() or "No Name"
         old_uname = f"@{c.get('old_username')}" if c.get("old_username") else "None"
         new_uname = f"@{c.get('new_username')}" if c.get("new_username") else "None"
-        changed_at = c.get("changed_at", "N/A")
+        changed_at_raw = c.get("changed_at", "N/A")
+        changed_at = database.format_datetime_ist(changed_at_raw)
         uid = c.get("user_id")
 
         entry = f"{idx}. 🆔 `{uid}`\n"
@@ -972,7 +972,7 @@ async def panel_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
                 context.bot,
                 target_group,
                 delete_msg_id=quiz_lock_message_id,
-                announce_text="🟢 **Quiz Samapt!** Group chat khol di gayi hai, aap sab message bhej sakte hain. ✅",
+                announce_text="🎉 Quiz समाप्त हो गया है !! ❤️",
                 auto_del_delay=30
             )
             quiz_lock_message_id = None
@@ -980,11 +980,7 @@ async def panel_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         else:
             # Turn ON (Lock chat)
             is_chat_manually_locked = True
-            announce_text = (
-                "🎯 **Quiz Time Active!** 🔴\n\n"
-                "Group chat ko temporarily mute/lock kar diya gaya hai taaki bina kisi disturbance ke Quiz smoothly chal sake.\n"
-                "Quiz poora hote hi chat wapas khol di jayegi!"
-            )
+            announce_text = "📣 Quiz खत्म होने के बाद Message Option ON कर दिया जाएगा !! ❤️"
             success, msg_id = await lock_chat(
                 context.bot,
                 target_group,
@@ -1156,7 +1152,6 @@ LINK_REGEX = re.compile(
     r'(https?://|www\.|t\.me/|telegram\.me/|bit\.ly/|[a-zA-Z0-9-]+\.(com|in|org|net|xyz|me|io|info|ru|co|biz|online|store|vip))',
     re.IGNORECASE
 )
-
 
 def has_link(message) -> bool:
     """Message ya caption me link detect karta hai."""
@@ -1705,11 +1700,7 @@ async def quizmode_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = args[0].lower()
     if action in ["on", "lock"]:
         is_chat_manually_locked = True
-        announce_text = (
-            "🎯 **Quiz Time Active!** 🔴\n\n"
-            "Group chat ko temporarily mute/lock kar diya gaya hai taaki bina kisi disturbance ke Quiz smoothly chal sake.\n"
-            "Quiz poora hote hi chat wapas khol di jayegi!"
-        )
+        announce_text = "📣 Quiz खत्म होने के बाद Message Option ON कर दिया जाएगा !! ❤️"
         success, msg_id = await lock_chat(
             context.bot,
             target_group,
@@ -1727,7 +1718,7 @@ async def quizmode_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.bot,
             target_group,
             delete_msg_id=quiz_lock_message_id,
-            announce_text="🟢 **Quiz Samapt!** Group chat khol di gayi hai, aap sab message bhej sakte hain. ✅",
+            announce_text="🎉 Quiz समाप्त हो गया है !! ❤️",
             auto_del_delay=30
         )
         quiz_lock_message_id = None
