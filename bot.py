@@ -79,6 +79,7 @@ def build_permissions(send_messages: bool = True) -> ChatPermissions:
     send_messages=True  → sirf message ON (unlock)
     send_messages=False → sirf message OFF (lock)
     Baaki sab permissions perm_* variables ke hisaab se set hoti hain.
+    NOTE: can_invite_users always perm_invite se aata hai (Telegram default ignore)
     """
     return ChatPermissions(
         can_send_messages=send_messages,
@@ -239,6 +240,9 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command instructions aur interactive buttons panel ke sath."""
     if not await is_allowed(update):
         return
+
+    # Telegram se real group permissions sync karo (agar kisi ne manually change ki ho)
+    await sync_permissions_from_telegram(context.bot)
 
     quiz_status  = "`ACTIVE (Chat Locked)` 🔴" if is_chat_manually_locked else "`INACTIVE (Chat Open)` 🟢"
     night_status = "`ACTIVE (Group Muted)` 🔒" if is_night_mode_active    else "`INACTIVE (Group Open)` 🔓"
@@ -612,6 +616,44 @@ async def namechanges_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="Markdown")
 
 # ─────────────────────────────────────────────────────────
+# Helper: Telegram se ACTUAL group permissions read karke
+#         perm_* variables update karta hai
+# ─────────────────────────────────────────────────────────
+async def sync_permissions_from_telegram(bot) -> bool:
+    """
+    Telegram API se group ki real current permissions read karta hai
+    aur perm_* variables ko actual state se sync karta hai.
+    NOTE: perm_invite sync nahi hota — Telegram ka default True hota hai
+    isliye invite sirf manual button se control hoga.
+    """
+    global perm_photos, perm_videos, perm_voice, perm_polls
+    global perm_stickers, perm_docs
+    # perm_invite intentionally yahan nahi — Telegram default True deta hai
+    if not ALLOWED_GROUP_ID:
+        return False
+    try:
+        chat = await bot.get_chat(chat_id=int(ALLOWED_GROUP_ID))
+        p    = chat.permissions
+        if p:
+            perm_photos   = bool(p.can_send_photos)
+            perm_videos   = bool(p.can_send_videos)
+            perm_voice    = bool(p.can_send_voice_notes) or bool(p.can_send_audios)
+            perm_polls    = bool(p.can_send_polls)
+            perm_stickers = bool(p.can_send_other_messages)
+            perm_docs     = bool(p.can_send_documents)
+            # perm_invite yahan sync nahi — user manually button se control kare
+            logger.info(
+                f"Permissions synced from Telegram: "
+                f"photos={perm_photos} videos={perm_videos} voice={perm_voice} "
+                f"polls={perm_polls} stickers={perm_stickers} docs={perm_docs} "
+                f"invite=NOT_SYNCED (manual only)"
+            )
+        return True
+    except Exception as e:
+        logger.warning(f"Could not sync permissions from Telegram: {e}")
+        return False
+
+# ─────────────────────────────────────────────────────────
 # Helper: dashboard text banata hai (refresh ke liye reuse)
 # ─────────────────────────────────────────────────────────
 def _dashboard_text() -> str:
@@ -645,9 +687,11 @@ async def panel_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     data         = query.data
     target_group = ALLOWED_GROUP_ID
 
-    # 1. Refresh Button
+    # 1. Refresh Button — Telegram se real permissions sync karke dashboard update karo
     if data == "btn_refresh":
-        await query.answer("🔄 Dashboard refresh ho raha hai...")
+        await query.answer("🔄 Syncing real permissions from Telegram...")
+        # Pehle Telegram se actual group permissions read karo
+        await sync_permissions_from_telegram(context.bot)
         try:
             await query.edit_message_text(_dashboard_text(), reply_markup=get_control_panel_keyboard(), parse_mode="Markdown")
         except Exception:
