@@ -62,24 +62,25 @@ pending_cleanup = {}
 # ============================================================
 # 🔧 GROUP PERMISSION STATES
 # Yeh variables track karte hain ki kaun si permission ON/OFF hai.
-# Quiz/Night Mode SIRF can_send_messages toggle karta hai — baaki sab yahan se aata hai.
+# Quiz/Night Mode SIRF can_send_messages toggle karta hai.
 # Owner dashboard se manually kisi bhi permission ko on/off kar sakti hain.
+# Sabhi states MongoDB me permanently save hoti hain.
 # ============================================================
-perm_photos   = False  # Photos — Default OFF, owner manually ON kare
-perm_videos   = False  # Videos — Default OFF, owner manually ON kare
-perm_voice    = False  # Voice/Audio — Default OFF, owner manually ON kare
-perm_polls    = False  # Polls — Default OFF, owner manually ON kare
-perm_stickers = False  # Stickers/GIFs — Default OFF, owner manually ON kare
-perm_invite   = False  # Invite — Default OFF, owner manually ON kare
-perm_docs     = False  # Files/Docs — Default OFF, owner manually ON kare
+perm_photos   = False  # Photos — Default OFF
+perm_videos   = False  # Videos — Default OFF
+perm_voice    = False  # Voice/Audio — Default OFF
+perm_polls    = False  # Polls — Default OFF
+perm_stickers = False  # Stickers/GIFs — Default OFF
+perm_invite   = False  # Invite — Default OFF
+perm_docs     = False  # Files/Docs — Default OFF
 
 def build_permissions(send_messages: bool = True) -> ChatPermissions:
     """
     Current perm_* state ke hisaab se ChatPermissions object banata hai.
     send_messages=True  → sirf message ON (unlock)
     send_messages=False → sirf message OFF (lock)
-    Baaki sab permissions perm_* variables ke hisaab se set hoti hain.
-    NOTE: can_invite_users always perm_invite se aata hai (Telegram default ignore)
+    use_independent_chat_permissions=True ke sath chalane par Telegram
+    har permission ko independently respect karta hai.
     """
     return ChatPermissions(
         can_send_messages=send_messages,
@@ -91,7 +92,7 @@ def build_permissions(send_messages: bool = True) -> ChatPermissions:
         can_send_voice_notes=perm_voice,
         can_send_polls=perm_polls,
         can_send_other_messages=perm_stickers,
-        can_add_web_page_previews=True,
+        can_add_web_page_previews=False,
         can_change_info=False,
         can_invite_users=perm_invite,
         can_pin_messages=False,
@@ -240,9 +241,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command instructions aur interactive buttons panel ke sath."""
     if not await is_allowed(update):
         return
-
-    # Telegram se real group permissions sync karo (agar kisi ne manually change ki ho)
-    await sync_permissions_from_telegram(context.bot)
 
     quiz_status  = "`ACTIVE (Chat Locked)` 🔴" if is_chat_manually_locked else "`INACTIVE (Chat Open)` 🟢"
     night_status = "`ACTIVE (Group Muted)` 🔒" if is_night_mode_active    else "`INACTIVE (Group Open)` 🔓"
@@ -687,11 +685,9 @@ async def panel_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     data         = query.data
     target_group = ALLOWED_GROUP_ID
 
-    # 1. Refresh Button — Telegram se real permissions sync karke dashboard update karo
+    # 1. Refresh Button — Dashboard update karo
     if data == "btn_refresh":
-        await query.answer("🔄 Syncing real permissions from Telegram...")
-        # Pehle Telegram se actual group permissions read karo
-        await sync_permissions_from_telegram(context.bot)
+        await query.answer("🔄 Dashboard refresh ho gaya!")
         try:
             await query.edit_message_text(_dashboard_text(), reply_markup=get_control_panel_keyboard(), parse_mode="Markdown")
         except Exception:
@@ -933,27 +929,34 @@ async def panel_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             await query.answer("❌ ALLOWED_GROUP_ID set nahi hai!", show_alert=True)
             return
 
-        # Toggle the right variable
+        # Toggle the right variable & save to database
         if data == "btn_perm_photos":
             perm_photos   = not perm_photos
+            database.set_bot_state("perm_photos", "true" if perm_photos else "false")
             label, new_val = "🖼 Photos",        perm_photos
         elif data == "btn_perm_videos":
             perm_videos   = not perm_videos
+            database.set_bot_state("perm_videos", "true" if perm_videos else "false")
             label, new_val = "🎥 Videos",        perm_videos
         elif data == "btn_perm_voice":
             perm_voice    = not perm_voice
+            database.set_bot_state("perm_voice", "true" if perm_voice else "false")
             label, new_val = "🎤 Voice/Audio",   perm_voice
         elif data == "btn_perm_polls":
             perm_polls    = not perm_polls
+            database.set_bot_state("perm_polls", "true" if perm_polls else "false")
             label, new_val = "📊 Polls",         perm_polls
         elif data == "btn_perm_stickers":
             perm_stickers = not perm_stickers
+            database.set_bot_state("perm_stickers", "true" if perm_stickers else "false")
             label, new_val = "😀 Stickers/GIFs", perm_stickers
         elif data == "btn_perm_invite":
             perm_invite   = not perm_invite
+            database.set_bot_state("perm_invite", "true" if perm_invite else "false")
             label, new_val = "🔗 Invite",        perm_invite
         elif data == "btn_perm_docs":
             perm_docs     = not perm_docs
+            database.set_bot_state("perm_docs", "true" if perm_docs else "false")
             label, new_val = "📄 Files/Docs",    perm_docs
 
         # Apply to group —
@@ -962,7 +965,8 @@ async def panel_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         try:
             await context.bot.set_chat_permissions(
                 chat_id=int(target_group),
-                permissions=build_permissions(send_messages=current_send_msgs)
+                permissions=build_permissions(send_messages=current_send_msgs),
+                use_independent_chat_permissions=True,
             )
             status_word = "✅ ON" if new_val else "❌ OFF"
             await query.answer(f"{label}: {status_word} kar diya gaya!", show_alert=True)
@@ -1093,6 +1097,63 @@ async def check_name_on_message(update: Update, context: ContextTypes.DEFAULT_TY
             return
         except Exception as e:
             logger.warning(f"Lock mode message delete error: {e}")
+
+    # Real-Time Enforcement: Agar permission OFF hai toh aam members ka media turant delete karein
+    if not (is_super_owner(user.id) or str(user.id) in LINK_ALLOWED_IDS):
+        u_name = user.first_name or "Member"
+        # 1. Photos
+        if not perm_photos and msg.photo:
+            try:
+                await msg.delete()
+                await send_auto_delete_warning(chat, f"⚠️ {u_name}, is group me **Photo** bhejna band hai!", delay=8)
+                return
+            except Exception:
+                pass
+
+        # 2. Videos / Video Notes / GIFs
+        if not perm_videos and (msg.video or msg.video_note or msg.animation):
+            try:
+                await msg.delete()
+                await send_auto_delete_warning(chat, f"⚠️ {u_name}, is group me **Video / GIF** bhejna band hai!", delay=8)
+                return
+            except Exception:
+                pass
+
+        # 3. Voice / Audio Notes
+        if not perm_voice and (msg.voice or msg.audio):
+            try:
+                await msg.delete()
+                await send_auto_delete_warning(chat, f"⚠️ {u_name}, is group me **Voice / Audio** bhejna band hai!", delay=8)
+                return
+            except Exception:
+                pass
+
+        # 4. Stickers
+        if not perm_stickers and msg.sticker:
+            try:
+                await msg.delete()
+                await send_auto_delete_warning(chat, f"⚠️ {u_name}, is group me **Stickers** bhejna band hai!", delay=8)
+                return
+            except Exception:
+                pass
+
+        # 5. Documents / Files
+        if not perm_docs and msg.document:
+            try:
+                await msg.delete()
+                await send_auto_delete_warning(chat, f"⚠️ {u_name}, is group me **Files / Documents** bhejna band hai!", delay=8)
+                return
+            except Exception:
+                pass
+
+        # 6. Polls
+        if not perm_polls and msg.poll:
+            try:
+                await msg.delete()
+                await send_auto_delete_warning(chat, f"⚠️ {u_name}, is group me **Polls** create karna band hai!", delay=8)
+                return
+            except Exception:
+                pass
 
     if user.is_bot:
         return
@@ -1241,7 +1302,8 @@ async def lock_chat(bot, chat_id, announce_text=None, partner_allow=True):
     try:
         await bot.set_chat_permissions(
             chat_id=int(chat_id),
-            permissions=build_permissions(send_messages=False)
+            permissions=build_permissions(send_messages=False),
+            use_independent_chat_permissions=True,
         )
         if partner_allow:
             # Partner 8914751355 ko lock ke baad bhi sabkuch bhejne ki permission
@@ -1282,7 +1344,8 @@ async def unlock_chat(bot, chat_id, delete_msg_id=None, announce_text=None, auto
     try:
         await bot.set_chat_permissions(
             chat_id=int(chat_id),
-            permissions=build_permissions(send_messages=True)
+            permissions=build_permissions(send_messages=True),
+            use_independent_chat_permissions=True,
         )
         if delete_msg_id:
             try:
@@ -1313,7 +1376,8 @@ async def enable_night_mode(bot, chat_id, announce=True):
     try:
         await bot.set_chat_permissions(
             chat_id=int(chat_id),
-            permissions=build_permissions(send_messages=False)
+            permissions=build_permissions(send_messages=False),
+            use_independent_chat_permissions=True,
         )
         is_night_mode_active = True
         database.set_bot_state("night_mode_active", "true")
@@ -1365,7 +1429,8 @@ async def disable_night_mode(bot, chat_id, announce=True):
     try:
         await bot.set_chat_permissions(
             chat_id=int(chat_id),
-            permissions=build_permissions(send_messages=True)
+            permissions=build_permissions(send_messages=True),
+            use_independent_chat_permissions=True,
         )
         is_night_mode_active = False
         database.set_bot_state("night_mode_active", "false")
@@ -1534,6 +1599,24 @@ async def weekly_report_worker(bot):
 
 async def post_init(application):
     global is_night_mode_active, night_mode_message_id, is_chat_manually_locked
+    global perm_photos, perm_videos, perm_voice, perm_polls, perm_stickers, perm_invite, perm_docs
+
+    # DB se saved permissions restore karo (taaki Render restart par buttons reset na hon)
+    if database.get_bot_state("perm_photos") is not None:
+        perm_photos = (database.get_bot_state("perm_photos") == "true")
+    if database.get_bot_state("perm_videos") is not None:
+        perm_videos = (database.get_bot_state("perm_videos") == "true")
+    if database.get_bot_state("perm_voice") is not None:
+        perm_voice = (database.get_bot_state("perm_voice") == "true")
+    if database.get_bot_state("perm_polls") is not None:
+        perm_polls = (database.get_bot_state("perm_polls") == "true")
+    if database.get_bot_state("perm_stickers") is not None:
+        perm_stickers = (database.get_bot_state("perm_stickers") == "true")
+    if database.get_bot_state("perm_invite") is not None:
+        perm_invite = (database.get_bot_state("perm_invite") == "true")
+    if database.get_bot_state("perm_docs") is not None:
+        perm_docs = (database.get_bot_state("perm_docs") == "true")
+
     saved_nm = database.get_bot_state("night_mode_active")
     if saved_nm == "true":
         is_night_mode_active = True
