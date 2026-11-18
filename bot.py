@@ -65,13 +65,13 @@ pending_cleanup = {}
 # Quiz/Night Mode SIRF can_send_messages toggle karta hai — baaki sab yahan se aata hai.
 # Owner dashboard se manually kisi bhi permission ko on/off kar sakti hain.
 # ============================================================
-perm_photos   = True   # Photos bhej sakte hain?
-perm_videos   = True   # Videos bhej sakte hain?
-perm_voice    = True   # Voice/Audio notes bhej sakte hain?
-perm_polls    = True   # Polls bhej sakte hain?
-perm_stickers = True   # Stickers / GIFs bhej sakte hain?
-perm_invite   = True   # Members invite kar sakte hain?
-perm_docs     = True   # Documents / Files bhej sakte hain?
+perm_photos   = False  # Photos — Default OFF, owner manually ON kare
+perm_videos   = False  # Videos — Default OFF, owner manually ON kare
+perm_voice    = False  # Voice/Audio — Default OFF, owner manually ON kare
+perm_polls    = False  # Polls — Default OFF, owner manually ON kare
+perm_stickers = False  # Stickers/GIFs — Default OFF, owner manually ON kare
+perm_invite   = False  # Invite — Default OFF, owner manually ON kare
+perm_docs     = False  # Files/Docs — Default OFF, owner manually ON kare
 
 def build_permissions(send_messages: bool = True) -> ChatPermissions:
     """
