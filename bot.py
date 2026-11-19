@@ -465,24 +465,55 @@ async def cleanup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    /ban command: Reply karke ya /ban @username ya /ban <user_id>
+    /ban command:
+    - Kisi ke message par Reply karke `/ban`
+    - Tag karke `/ban @username` ya `/ban [Tag Member]`
+    - User ID se `/ban 12345678`
     Bot usko group se ban karega aur 'GET OUT 🪟🧹' bolega — 20s me auto-delete.
     """
-    if not await is_allowed(update):
+    user = update.effective_user
+    msg  = update.effective_message
+    chat = update.effective_chat
+
+    if not user or not msg or not chat:
         return
-    msg          = update.effective_message
-    chat         = update.effective_chat
+
+    # Sirf Super Owner (6416451659) ya Partner (8914751355) ban kar sakte hain
+    if not (is_super_owner(user.id) or str(user.id) in LINK_ALLOWED_IDS):
+        logger.warning(f"Unauthorized /ban attempt by {user.id}")
+        return
+
     target_group = ALLOWED_GROUP_ID or (chat.id if chat.type in ["group", "supergroup"] else None)
     if not target_group:
         await msg.reply_text("❌ ALLOWED_GROUP_ID set nahi hai.")
         return
+
     target_user_id = None
     target_name    = "User"
+
+    # Case 1: Reply to someone's message
     if msg.reply_to_message and msg.reply_to_message.from_user:
         target_user    = msg.reply_to_message.from_user
         target_user_id = target_user.id
         target_name    = target_user.first_name
-    elif context.args:
+
+    # Case 2: Telegram Tag / Mention Entity (jab user ko tag select kiya jata hai)
+    elif msg.entities:
+        for ent in msg.entities:
+            if ent.type == MessageEntityType.TEXT_MENTION and ent.user:
+                target_user_id = ent.user.id
+                target_name    = ent.user.first_name
+                break
+            elif ent.type == MessageEntityType.MENTION:
+                mention_text = msg.text[ent.offset : ent.offset + ent.length].lstrip("@")
+                hist = database.get_user_history(mention_text)
+                if hist and hist.get("user_id"):
+                    target_user_id = int(hist["user_id"])
+                    target_name    = hist.get("first_name") or mention_text
+                    break
+
+    # Case 3: Typed text args (/ban 123456 ya /ban @username)
+    if not target_user_id and context.args:
         arg = context.args[0].strip()
         if arg.isdigit():
             target_user_id = int(arg)
@@ -494,40 +525,59 @@ async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 target_user_id = int(hist["user_id"])
                 target_name    = hist.get("first_name") or arg
             else:
-                await msg.reply_text(f"❌ User `{arg}` database me nahi mila.", parse_mode="Markdown")
+                await msg.reply_text(f"❌ User `{arg}` database me nahi mila. Kripya uske message par reply karke `/ban` karein ya user ID likhein.", parse_mode="Markdown")
                 return
-        else:
-            await msg.reply_text("ℹ️ Format: `/ban @username` ya `/ban <user_id>`", parse_mode="Markdown")
-            return
-    else:
-        await msg.reply_text("ℹ️ Kripya kisi ke message par reply karein ya type karein:\n`/ban @username` ya `/ban <user_id>`", parse_mode="Markdown")
+
+    if not target_user_id:
+        await msg.reply_text(
+            "ℹ️ **Ban karne ka sahi tareeka:**\n"
+            "1. Member ke message par Reply karein aur likhein: `/ban`\n"
+            "2. Ya likhein: `/ban @username`\n"
+            "3. Ya likhein: `/ban <user_id>`",
+            parse_mode="Markdown"
+        )
         return
+
+    # Whitelist Protection
     if is_super_owner(target_user_id) or str(target_user_id) in LINK_ALLOWED_IDS:
         await msg.reply_text("⛔ Yeh Owner / Partner hain! Inhe ban nahi kiya ja sakta.")
         return
+
     try:
+        # 1. Admin/Owner ka command message (/ban @user) TURANT group se delete kar do
+        if chat.type in ["group", "supergroup"]:
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+
+        # 2. Group se member ko Ban karo
         await context.bot.ban_chat_member(chat_id=int(target_group), user_id=target_user_id)
-        logger.info(f"User {target_user_id} ({target_name}) banned from chat {target_group} by Owner.")
+        logger.info(f"User {target_user_id} ({target_name}) banned from chat {target_group} by {user.id}.")
         database.member_left(user_id=target_user_id)
-        user_mention  = f"[{target_name}](tg://user?id={target_user_id})"
-        ban_msg_text  = f"🚪 {user_mention}\n\n**GET OUT 🪟🧹**"
-        sent_ban_msg  = await context.bot.send_message(
+
+        # 3. 'GET OUT 🪟🧹' wala message group me bhejo
+        user_mention = f"[{target_name}](tg://user?id={target_user_id})"
+        ban_msg_text = f"🚪 {user_mention}\n\n**GET OUT 🪟🧹**"
+        sent_ban_msg = await context.bot.send_message(
             chat_id=int(target_group),
             text=ban_msg_text,
             parse_mode="Markdown"
         )
+
+        # 4. Sirf 'GET OUT' wala notice theek 20 second baad delete ho
         async def _auto_del_ban():
             await asyncio.sleep(20)
             try:
                 await sent_ban_msg.delete()
-                if chat.type in ["group", "supergroup"]:
-                    await msg.delete()
             except Exception:
                 pass
+
         asyncio.create_task(_auto_del_ban())
+
     except Exception as e:
         logger.error(f"Error banning user {target_user_id}: {e}")
-        await msg.reply_text(f"❌ Ban karne me error aaya: {e}")
+        await msg.reply_text(f"❌ Ban karne me error aaya: `{e}`\n*(Dhyan dein: Bot ke paas group me 'Ban Users' ki admin permission honi chahiye)*", parse_mode="Markdown")
 
 async def members_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_allowed(update):
