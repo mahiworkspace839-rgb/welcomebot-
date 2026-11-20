@@ -505,6 +505,256 @@ async def cleanup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
+async def mute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /mute command — Kisi bhi user ka message option manually OFF karta hai.
+    Usage:
+      - Kisi ke message par reply karke: /mute
+      - User ID se: /mute 123456789
+      - Username se: /mute @username
+    Sirf Super Owner (6416451659) use kar sakta hai.
+    """
+    user = update.effective_user
+    msg  = update.effective_message
+    chat = update.effective_chat
+
+    if not user or not msg or not chat:
+        return
+
+    if not await is_allowed(update):
+        return
+
+    target_group = ALLOWED_GROUP_ID or (chat.id if chat.type in ["group", "supergroup"] else None)
+    if not target_group:
+        await msg.reply_text("❌ ALLOWED_GROUP_ID set nahi hai.")
+        return
+
+    target_user_id = None
+    target_name    = "User"
+
+    # Case 1: Reply to someone's message
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        target_user    = msg.reply_to_message.from_user
+        target_user_id = target_user.id
+        target_name    = target_user.first_name
+
+    # Case 2: Telegram Tag / Mention Entity
+    elif msg.entities:
+        for ent in msg.entities:
+            if ent.type == MessageEntityType.TEXT_MENTION and ent.user:
+                target_user_id = ent.user.id
+                target_name    = ent.user.first_name
+                break
+            elif ent.type == MessageEntityType.MENTION:
+                mention_text = msg.text[ent.offset : ent.offset + ent.length].lstrip("@")
+                hist = database.get_user_history(mention_text)
+                if hist and hist.get("user_id"):
+                    target_user_id = int(hist["user_id"])
+                    target_name    = hist.get("first_name") or mention_text
+                    break
+
+    # Case 3: Typed args (/mute 123456 ya /mute @username)
+    if not target_user_id and context.args:
+        arg = context.args[0].strip()
+        if arg.isdigit():
+            target_user_id = int(arg)
+            target_name    = f"ID {arg}"
+        elif arg.startswith("@"):
+            uname_clean = arg.lstrip("@")
+            hist = database.get_user_history(uname_clean)
+            if hist and hist.get("user_id"):
+                target_user_id = int(hist["user_id"])
+                target_name    = hist.get("first_name") or arg
+            else:
+                await msg.reply_text(
+                    f"❌ User `{arg}` database me nahi mila.\n"
+                    "Kripya uske message par reply karke `/mute` karein ya User ID likhein.",
+                    parse_mode="Markdown"
+                )
+                return
+
+    if not target_user_id:
+        await msg.reply_text(
+            "ℹ️ **Mute karne ka sahi tareeka:**\n"
+            "1. Member ke message par Reply karein aur likhein: `/mute`\n"
+            "2. Ya likhein: `/mute @username`\n"
+            "3. Ya likhein: `/mute <user_id>`",
+            parse_mode="Markdown"
+        )
+        return
+
+    # Owner / Partner ko mute nahi kar sakte
+    if is_super_owner(target_user_id) or str(target_user_id) in LINK_ALLOWED_IDS:
+        await msg.reply_text("⛔ Yeh Owner / Partner hain! Inhe mute nahi kiya ja sakta.")
+        return
+
+    try:
+        # Telegram se message permission hatao
+        await context.bot.restrict_chat_member(
+            chat_id=int(target_group),
+            user_id=target_user_id,
+            permissions=ChatPermissions(can_send_messages=False),
+        )
+        # MongoDB me mute flag save karo
+        database.set_bot_state(f"fake_muted_{target_user_id}", "true")
+        logger.info(f"User {target_user_id} ({target_name}) manually muted by owner {user.id}.")
+
+        user_mention = f"[{target_name}](tg://user?id={target_user_id})"
+        sent = await context.bot.send_message(
+            chat_id=int(target_group),
+            text=(
+                f"🔇 {user_mention} ka **Message Option OFF** kar diya gaya!\n\n"
+                "Unmute ke liye owner `/unmute` command use karein."
+            ),
+            parse_mode="Markdown"
+        )
+
+        # 30 second baad auto-delete
+        async def _del():
+            await asyncio.sleep(30)
+            try:
+                await sent.delete()
+            except Exception:
+                pass
+        asyncio.create_task(_del())
+
+        # /mute command bhi group me se delete karo
+        if chat.type in ["group", "supergroup"]:
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+
+    except Exception as e:
+        logger.error(f"Mute error for {target_user_id}: {e}")
+        await msg.reply_text(
+            f"❌ Mute karne me error aaya: `{e}`\n"
+            "*(Bot ke paas group me admin permission honi chahiye)*",
+            parse_mode="Markdown"
+        )
+
+
+async def unmute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /unmute command — Kisi bhi user ka message option manually ON karta hai.
+    Usage:
+      - Kisi ke message par reply karke: /unmute
+      - User ID se: /unmute 123456789
+      - Username se: /unmute @username
+    Sirf Super Owner (6416451659) use kar sakta hai.
+    """
+    user = update.effective_user
+    msg  = update.effective_message
+    chat = update.effective_chat
+
+    if not user or not msg or not chat:
+        return
+
+    if not await is_allowed(update):
+        return
+
+    target_group = ALLOWED_GROUP_ID or (chat.id if chat.type in ["group", "supergroup"] else None)
+    if not target_group:
+        await msg.reply_text("❌ ALLOWED_GROUP_ID set nahi hai.")
+        return
+
+    target_user_id = None
+    target_name    = "User"
+
+    # Case 1: Reply to someone's message
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        target_user    = msg.reply_to_message.from_user
+        target_user_id = target_user.id
+        target_name    = target_user.first_name
+
+    # Case 2: Telegram Tag / Mention Entity
+    elif msg.entities:
+        for ent in msg.entities:
+            if ent.type == MessageEntityType.TEXT_MENTION and ent.user:
+                target_user_id = ent.user.id
+                target_name    = ent.user.first_name
+                break
+            elif ent.type == MessageEntityType.MENTION:
+                mention_text = msg.text[ent.offset : ent.offset + ent.length].lstrip("@")
+                hist = database.get_user_history(mention_text)
+                if hist and hist.get("user_id"):
+                    target_user_id = int(hist["user_id"])
+                    target_name    = hist.get("first_name") or mention_text
+                    break
+
+    # Case 3: Typed args (/unmute 123456 ya /unmute @username)
+    if not target_user_id and context.args:
+        arg = context.args[0].strip()
+        if arg.isdigit():
+            target_user_id = int(arg)
+            target_name    = f"ID {arg}"
+        elif arg.startswith("@"):
+            uname_clean = arg.lstrip("@")
+            hist = database.get_user_history(uname_clean)
+            if hist and hist.get("user_id"):
+                target_user_id = int(hist["user_id"])
+                target_name    = hist.get("first_name") or arg
+            else:
+                await msg.reply_text(
+                    f"❌ User `{arg}` database me nahi mila.\n"
+                    "Kripya uske message par reply karke `/unmute` karein ya User ID likhein.",
+                    parse_mode="Markdown"
+                )
+                return
+
+    if not target_user_id:
+        await msg.reply_text(
+            "ℹ️ **Unmute karne ka sahi tareeka:**\n"
+            "1. Member ke message par Reply karein aur likhein: `/unmute`\n"
+            "2. Ya likhein: `/unmute @username`\n"
+            "3. Ya likhein: `/unmute <user_id>`",
+            parse_mode="Markdown"
+        )
+        return
+
+    try:
+        # Telegram se message permission restore karo
+        await context.bot.restrict_chat_member(
+            chat_id=int(target_group),
+            user_id=target_user_id,
+            permissions=build_permissions(send_messages=True),
+        )
+        # MongoDB me fake_muted flag hatao (agar tha toh)
+        database.set_bot_state(f"fake_muted_{target_user_id}", "false")
+        logger.info(f"User {target_user_id} ({target_name}) manually unmuted by owner {user.id}.")
+
+        user_mention = f"[{target_name}](tg://user?id={target_user_id})"
+        sent = await context.bot.send_message(
+            chat_id=int(target_group),
+            text=f"✅ {user_mention} ka **Message Option ON** kar diya gaya! 🎉",
+            parse_mode="Markdown"
+        )
+
+        # 30 second baad auto-delete
+        async def _del():
+            await asyncio.sleep(30)
+            try:
+                await sent.delete()
+            except Exception:
+                pass
+        asyncio.create_task(_del())
+
+        # /unmute command bhi group me se delete karo
+        if chat.type in ["group", "supergroup"]:
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+
+    except Exception as e:
+        logger.error(f"Unmute error for {target_user_id}: {e}")
+        await msg.reply_text(
+            f"❌ Unmute karne me error aaya: `{e}`\n"
+            "*(Bot ke paas group me admin permission honi chahiye)*",
+            parse_mode="Markdown"
+        )
+
+
 async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /ban command:
@@ -1803,6 +2053,8 @@ def main():
     application.add_handler(CommandHandler("nightmode",   nightmode_cmd))
     application.add_handler(CommandHandler("quiz",        quizmode_cmd))
     application.add_handler(CommandHandler("ban",         ban_cmd))
+    application.add_handler(CommandHandler("mute",        mute_cmd))
+    application.add_handler(CommandHandler("unmute",      unmute_cmd))
     application.add_handler(CommandHandler("namechanges", namechanges_cmd))
     application.add_handler(CommandHandler("weekly",      weekly_cmd))
     application.add_handler(CommandHandler("cleanup",     cleanup_cmd))
