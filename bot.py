@@ -1389,6 +1389,25 @@ async def handle_name_change(chat, user):
                     except Exception:
                         pass
                 asyncio.create_task(_del_unmute(sent_unmute))
+
+                # 📩 Super Owner ko Private DM me notify karo
+                try:
+                    u_full = f"{user.first_name or ''} {user.last_name or ''}".strip() or "No Name"
+                    dm_unmute = (
+                        f"🎉 **Auto-Unmute Notification (Real Name Verified)**\n\n"
+                        f"👤 **Name:** {u_full}\n"
+                        f"🆔 **User ID:** `{user.id}`\n"
+                        f"🔗 **Username:** @{user.username if user.username else 'None'}\n"
+                        f"👥 **Group:** {chat.title or 'Group'}\n\n"
+                        f"✅ Is member ne apna real name set kar liya hai, isliye iska **Message Option wapas ON** ho gaya hai!"
+                    )
+                    await chat.bot.send_message(
+                        chat_id=int(SUPER_OWNER_ID),
+                        text=dm_unmute,
+                        parse_mode="Markdown"
+                    )
+                except Exception as dm_unmute_err:
+                    logger.warning(f"Could not send DM to Super Owner: {dm_unmute_err}")
             except Exception as unmute_err:
                 logger.warning(f"Could not unmute fake-name user {user.id}: {unmute_err}")
         # ──────────────────────────────────────────────────────────────────
@@ -1650,6 +1669,29 @@ async def track_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         except Exception:
                             pass
                     asyncio.create_task(_del_notice(sent_notice))
+
+                    # 📩 Super Owner ko Private DM me alert bhejo
+                    try:
+                        u_full = f"{user.first_name or ''} {user.last_name or ''}".strip() or "No Name"
+                        u_uname = f"@{user.username}" if user.username else "None"
+                        dm_alert = (
+                            f"🚨 **Auto-Mute Notification (Fake Name)**\n\n"
+                            f"👤 **Name:** {u_full}\n"
+                            f"🆔 **User ID:** `{user.id}`\n"
+                            f"🔗 **Username:** {u_uname}\n"
+                            f"👥 **Group:** {chat.title or 'Group'}\n\n"
+                            f"⚠️ Is member ka naam adhura/fake hone ki wajah se iska **Message Option OFF** kar diya gaya hai.\n\n"
+                            f"👉 Agar aap isko manually message allow karna chahte hain toh likhein:\n"
+                            f"`/unmute {user.id}`"
+                        )
+                        await context.bot.send_message(
+                            chat_id=int(SUPER_OWNER_ID),
+                            text=dm_alert,
+                            parse_mode="Markdown"
+                        )
+                        logger.info(f"Fake mute DM sent to Super Owner for user {user.id}")
+                    except Exception as dm_e:
+                        logger.warning(f"Could not send DM to Super Owner: {dm_e}")
                 except Exception as mute_err:
                     logger.warning(f"Could not mute fake-name user {user.id}: {mute_err}")
         # ─────────────────────────────────────────────────────────────────
