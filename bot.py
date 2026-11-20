@@ -98,6 +98,48 @@ def build_permissions(send_messages: bool = True) -> ChatPermissions:
         can_pin_messages=False,
     )
 
+def is_fake_name(first: str, last: str = "") -> bool:
+    """
+    Check karta hai ki user ka naam fake/adhura hai ya nahi.
+    Returns True agar naam suspicious lage (mute karna chahiye).
+    Returns False agar naam real/poora lage (mute nahi karna).
+    """
+    full = f"{first or ''} {last or ''}".strip()
+
+    # Bilkul koi naam nahi
+    if not full or len(full) < 2:
+        return True
+
+    # Sirf digits (e.g., "123456")
+    if full.replace(" ", "").isdigit():
+        return True
+
+    # Koi letter hi nahi (sirf emojis/symbols)
+    letters = [c for c in full if c.isalpha()]
+    if not letters:
+        return True
+
+    # Latin letters hain lekin koi bhi vowel nahi — gibberish (e.g., "skdk", "rk mk", "bcd")
+    latin_letters = [c.lower() for c in letters if ord(c) < 256]
+    if latin_letters and not any(c in "aeiou" for c in latin_letters):
+        return True
+
+    # Single word AND bahut chhota (e.g., "Mk", "s", "R")
+    words = full.split()
+    if len(words) == 1 and len(words[0]) <= 2:
+        return True
+
+    # Pehla word sirf 1 letter hai aur total words <= 2 (e.g., "s singh", "r k")
+    if len(words[0]) <= 1:
+        return True
+
+    # Pehle 2 words dono hi ek-ek letter ke hain (e.g., "r k", "M K")
+    if len(words) >= 2 and len(words[0]) <= 1 and len(words[1]) <= 1:
+        return True
+
+    return False
+
+
 def contains_bad_word(text: str) -> bool:
     """Check karta hai ki message me koi gaali/bad word hai ya nahi."""
     if not text:
@@ -1071,6 +1113,36 @@ async def handle_name_change(chat, user):
             except Exception as del_err:
                 logger.warning(f"Alert auto-delete error: {del_err}")
         asyncio.create_task(auto_delete_alert(sent_alert, 30))
+
+        # ── Fake Name Auto-Unmute ──────────────────────────────────────────
+        # Agar yeh user pehle fake naam ki wajah se muted tha,
+        # aur ab usne apna naam real kar liya hai, toh auto-unmute kar do
+        was_fake_muted = database.get_bot_state(f"fake_muted_{user.id}")
+        if was_fake_muted == "true" and not is_fake_name(user.first_name or "", user.last_name or ""):
+            try:
+                await chat.bot.restrict_chat_member(
+                    chat_id=chat.id,
+                    user_id=user.id,
+                    permissions=build_permissions(send_messages=True),
+                )
+                database.set_bot_state(f"fake_muted_{user.id}", "false")
+                logger.info(f"User {user.id} fake-name mute hataya gaya — naam real ho gaya.")
+                sent_unmute = await chat.send_message(
+                    f"✅ **{user.first_name}** ka naam verify ho gaya!\n"
+                    "Message option wapas ON kar diya gaya! 🎉",
+                    parse_mode="Markdown"
+                )
+                async def _del_unmute(m):
+                    await asyncio.sleep(30)
+                    try:
+                        await m.delete()
+                    except Exception:
+                        pass
+                asyncio.create_task(_del_unmute(sent_unmute))
+            except Exception as unmute_err:
+                logger.warning(f"Could not unmute fake-name user {user.id}: {unmute_err}")
+        # ──────────────────────────────────────────────────────────────────
+
     except Exception as e:
         logger.error(f"Name change alert error: {e}")
 
@@ -1302,6 +1374,35 @@ async def track_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
             asyncio.create_task(auto_delete(sent_msg, 60))
         except Exception as e:
             logger.error(f"Welcome message error: {e}")
+
+        # ── Fake Name Detection — New Member ──────────────────────────────
+        # Owner / Partner ko skip karo
+        if not (is_super_owner(user.id) or str(user.id) in LINK_ALLOWED_IDS):
+            if is_fake_name(user.first_name or "", user.last_name or ""):
+                try:
+                    await context.bot.restrict_chat_member(
+                        chat_id=chat.id,
+                        user_id=user.id,
+                        permissions=ChatPermissions(can_send_messages=False),
+                    )
+                    database.set_bot_state(f"fake_muted_{user.id}", "true")
+                    logger.info(f"Fake name detected — user {user.id} ({user.first_name}) muted.")
+                    notice_text = (
+                        f"⚠️ **{user.first_name}**, aapka naam adhura ya fake lag raha hai!\n\n"
+                        "📝 Kripya Telegram profile me jakar apna **Real Poora Naam** set karein.\n"
+                        "✅ Naam update hote hi aapka message option automatically ON ho jayega! ❤️"
+                    )
+                    sent_notice = await chat.send_message(notice_text, parse_mode="Markdown")
+                    async def _del_notice(m):
+                        await asyncio.sleep(30)
+                        try:
+                            await m.delete()
+                        except Exception:
+                            pass
+                    asyncio.create_task(_del_notice(sent_notice))
+                except Exception as mute_err:
+                    logger.warning(f"Could not mute fake-name user {user.id}: {mute_err}")
+        # ─────────────────────────────────────────────────────────────────
 
     elif was_member and not is_member:
         logger.info(f"Member LEFT: {user.first_name} (ID: {user.id})")
