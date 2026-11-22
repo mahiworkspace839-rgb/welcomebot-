@@ -73,6 +73,7 @@ perm_polls    = False  # Polls — Default OFF
 perm_stickers = False  # Stickers/GIFs — Default OFF
 perm_invite   = False  # Invite — Default OFF
 perm_docs     = False  # Files/Docs — Default OFF
+perm_reactions= True   # Reactions — Default ON (👍 ❤️ etc.)
 
 def build_permissions(send_messages: bool = True) -> ChatPermissions:
     """
@@ -81,6 +82,7 @@ def build_permissions(send_messages: bool = True) -> ChatPermissions:
     send_messages=False → sirf message OFF (lock)
     use_independent_chat_permissions=True ke sath chalane par Telegram
     har permission ko independently respect karta hai.
+    can_react_to_messages=perm_reactions ensure karta hai ki reactions off na hon.
     """
     return ChatPermissions(
         can_send_messages=send_messages,
@@ -96,6 +98,7 @@ def build_permissions(send_messages: bool = True) -> ChatPermissions:
         can_change_info=False,
         can_invite_users=perm_invite,
         can_pin_messages=False,
+        can_react_to_messages=perm_reactions,
     )
 
 def is_fake_name(first: str, last: str = "") -> bool:
@@ -225,8 +228,9 @@ def get_control_panel_keyboard() -> InlineKeyboardMarkup:
     vo_txt  = "🎤 Voice ✅"   if perm_voice    else "🎤 Voice ❌"
     pl_txt  = "📊 Poll ✅"    if perm_polls    else "📊 Poll ❌"
     st_txt  = "😀 Sticker ✅" if perm_stickers else "😀 Sticker ❌"
-    inv_txt = "🔗 Invite ✅"  if perm_invite   else "🔗 Invite ❌"
-    doc_txt = "📄 File ✅"    if perm_docs     else "📄 File ❌"
+    inv_txt = "🔗 Invite ✅"   if perm_invite    else "🔗 Invite ❌"
+    doc_txt = "📄 File ✅"     if perm_docs      else "📄 File ❌"
+    rea_txt = "👍 Reaction ✅" if perm_reactions else "👍 Reaction ❌"
 
     keyboard = [
         [
@@ -267,6 +271,7 @@ def get_control_panel_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(doc_txt, callback_data="btn_perm_docs"),
+            InlineKeyboardButton(rea_txt, callback_data="btn_perm_reactions"),
         ],
         # ───────────────────────────────────────────────────────────
         [
@@ -967,7 +972,7 @@ async def sync_permissions_from_telegram(bot) -> bool:
     isliye invite sirf manual button se control hoga.
     """
     global perm_photos, perm_videos, perm_voice, perm_polls
-    global perm_stickers, perm_docs
+    global perm_stickers, perm_docs, perm_reactions
     # perm_invite intentionally yahan nahi — Telegram default True deta hai
     if not ALLOWED_GROUP_ID:
         return False
@@ -981,12 +986,14 @@ async def sync_permissions_from_telegram(bot) -> bool:
             perm_polls    = bool(p.can_send_polls)
             perm_stickers = bool(p.can_send_other_messages)
             perm_docs     = bool(p.can_send_documents)
+            if hasattr(p, 'can_react_to_messages') and p.can_react_to_messages is not None:
+                perm_reactions = bool(p.can_react_to_messages)
             # perm_invite yahan sync nahi — user manually button se control kare
             logger.info(
                 f"Permissions synced from Telegram: "
                 f"photos={perm_photos} videos={perm_videos} voice={perm_voice} "
                 f"polls={perm_polls} stickers={perm_stickers} docs={perm_docs} "
-                f"invite=NOT_SYNCED (manual only)"
+                f"reactions={perm_reactions} invite=NOT_SYNCED (manual only)"
             )
         return True
     except Exception as e:
@@ -1013,7 +1020,7 @@ def _dashboard_text() -> str:
 async def panel_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Button click hone par actions handle karta hai."""
     global is_chat_manually_locked, quiz_lock_message_id, is_night_mode_active, night_mode_message_id
-    global perm_photos, perm_videos, perm_voice, perm_polls, perm_stickers, perm_invite, perm_docs
+    global perm_photos, perm_videos, perm_voice, perm_polls, perm_stickers, perm_invite, perm_docs, perm_reactions
 
     query = update.callback_query
     if not query:
@@ -1266,7 +1273,8 @@ async def panel_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     # 15. Individual Permission Toggles ─────────────────────────────────
     elif data in ("btn_perm_photos", "btn_perm_videos", "btn_perm_voice",
-                  "btn_perm_polls",  "btn_perm_stickers", "btn_perm_invite", "btn_perm_docs"):
+                  "btn_perm_polls",  "btn_perm_stickers", "btn_perm_invite",
+                  "btn_perm_docs",   "btn_perm_reactions"):
         if not target_group:
             await query.answer("❌ ALLOWED_GROUP_ID set nahi hai!", show_alert=True)
             return
@@ -1300,6 +1308,10 @@ async def panel_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             perm_docs     = not perm_docs
             database.set_bot_state("perm_docs", "true" if perm_docs else "false")
             label, new_val = "📄 Files/Docs",    perm_docs
+        elif data == "btn_perm_reactions":
+            perm_reactions = not perm_reactions
+            database.set_bot_state("perm_reactions", "true" if perm_reactions else "false")
+            label, new_val = "👍 Reactions",     perm_reactions
 
         # Apply to group —
         # Agar quiz/night lock hai toh messages off rahenge, baaki sab update hoga
@@ -1766,6 +1778,7 @@ async def lock_chat(bot, chat_id, announce_text=None, partner_allow=True):
                         can_send_other_messages=True,
                         can_add_web_page_previews=True,
                         can_invite_users=True,
+                        can_react_to_messages=True,
                     ),
                 )
             except Exception as partner_err:
@@ -1843,6 +1856,7 @@ async def enable_night_mode(bot, chat_id, announce=True):
                     can_send_other_messages=True,
                     can_add_web_page_previews=True,
                     can_invite_users=True,
+                    can_react_to_messages=True,
                 ),
             )
             logger.info("Partner 8914751355 ko night mode me bhi full permission di.")
@@ -2042,7 +2056,7 @@ async def weekly_report_worker(bot):
 
 async def post_init(application):
     global is_night_mode_active, night_mode_message_id, is_chat_manually_locked
-    global perm_photos, perm_videos, perm_voice, perm_polls, perm_stickers, perm_invite, perm_docs
+    global perm_photos, perm_videos, perm_voice, perm_polls, perm_stickers, perm_invite, perm_docs, perm_reactions
 
     # DB se saved permissions restore karo (taaki Render restart par buttons reset na hon)
     if database.get_bot_state("perm_photos") is not None:
@@ -2059,6 +2073,10 @@ async def post_init(application):
         perm_invite = (database.get_bot_state("perm_invite") == "true")
     if database.get_bot_state("perm_docs") is not None:
         perm_docs = (database.get_bot_state("perm_docs") == "true")
+    if database.get_bot_state("perm_reactions") is not None:
+        perm_reactions = (database.get_bot_state("perm_reactions") == "true")
+    else:
+        perm_reactions = True  # Default reactions ON
 
     saved_nm = database.get_bot_state("night_mode_active")
     if saved_nm == "true":
